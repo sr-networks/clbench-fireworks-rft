@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# eval-protocol upload artifact
+*.tar.gz
+
+# run outputs / local results
+results/
+bin/
+
+# vendored CLBench held-out benchmark data (canary-marked: "should never appear in training corpora")
+benchmark_fixtures/
+
+# OS
+.DS_Store
