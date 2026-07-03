@@ -32,12 +32,33 @@ NUDGE = (
     "EVER seen with its observed width, and report ALL of them every scan, not just the ones detected now."
 )
 
-PROMPTS = {"neutral": COMMON, "nudge": COMMON + NUDGE}
+# NOTEPAD arms (bench icl_notepad semantics): the INTERFACE is explained to BOTH arms (that a notepad exists
+# and how to update it — that's mechanics, not strategy); only the nudge arm is told WHAT to use it for.
+NP_COMMON = (
+    "You are a spectrum-monitoring analyst working through a SERIES of scans of one radio band, shown ONE AT "
+    "A TIME. Each scan lists noisy detected peaks (frequency, power, width). After each scan, submit your "
+    "occupancy report with the submit_report tool: center_freqs = the center frequency (MHz) of every region "
+    "you believe is occupied, and bandwidths = the width (MHz) of each region, in the same order. You are "
+    "scored on how well your report matches the band's true occupancy.\n\n"
+    "You CANNOT see earlier scans or your earlier reports. Each scan shows YOUR NOTEPAD — a text that "
+    "persists from scan to scan. You may replace it by including the optional notepad_update field in your "
+    "submit_report call; otherwise it stays unchanged. The notepad is the only thing that persists.\n\n"
+    "Think BRIEFLY, then act — keep your reasoning to a sentence or two."
+)
+NP_NUDGE = (
+    "\n\nIMPORTANT — use your notepad as memory: this is ONE fixed band, and transmitters that are silent in "
+    "the current scan are usually still there (they transmit intermittently). Keep a complete list in your "
+    "notepad of every transmitter you have EVER seen, with its observed width, and update it every scan. "
+    "Report ALL transmitters on your notepad every scan, not just the ones detected now."
+)
+
+PROMPTS = {"neutral": COMMON, "nudge": COMMON + NUDGE,
+           "np-neutral": NP_COMMON, "np-nudge": NP_COMMON + NP_NUDGE}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt", choices=["neutral", "nudge"], required=True)
+    ap.add_argument("--prompt", choices=["neutral", "nudge", "np-neutral", "np-nudge"], required=True)
     ap.add_argument("--n", type=int, default=48)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()

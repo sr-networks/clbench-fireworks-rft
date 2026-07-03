@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from typing import Any, Dict, List
@@ -38,17 +39,31 @@ from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # 
 
 MAX_INNER_CALLS = 3
 SANITY_MAX_REPORT = 40           # generous; the canonical band has 13 channels
-print("[canon] processor v3 (robust calls: retry+backoff, empty-choices guarded, force-advance on dead turns)", flush=True)
 THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# NOTEPAD mode (bench icl_notepad semantics; env var set by the test entry BEFORE import): context CLEARED
+# between instances; a notepad is shown with every scan and updated via the optional notepad_update field of
+# the report — the notepad is the ONLY cross-instance carrier (memory in the strict sense). Default (off) =
+# ICL mode (full conversation history).
+NOTEPAD_MODE = os.environ.get("SPECTRUM_CANON_NOTEPAD") == "1"
+NOTEPAD_MAX = 4000
+print(f"[canon] processor v4 (robust calls; mode={'NOTEPAD' if NOTEPAD_MODE else 'ICL'})", flush=True)
+
+_PROPS: Dict[str, Any] = {
+    "center_freqs": {"type": "array", "items": {"type": "number"}},
+    "bandwidths": {"type": "array", "items": {"type": "number"}},
+}
+if NOTEPAD_MODE:
+    _PROPS["notepad_update"] = {
+        "type": "string",
+        "description": ("Optional: replace your notepad with this text (it persists to the next scan; "
+                        "omit to keep the current notepad unchanged)."),
+    }
 TOOLS: List[Dict[str, Any]] = [{"type": "function", "function": {
     "name": "submit_report",
     "description": ("Submit your occupancy report for the CURRENT scan. center_freqs: the center frequency "
                     "(MHz) of every occupied region; bandwidths: the width (MHz) of each region, same order."),
-    "parameters": {"type": "object", "properties": {
-        "center_freqs": {"type": "array", "items": {"type": "number"}},
-        "bandwidths": {"type": "array", "items": {"type": "number"}},
-    }, "required": ["center_freqs", "bandwidths"]},
+    "parameters": {"type": "object", "properties": _PROPS, "required": ["center_freqs", "bandwidths"]},
 }}]
 
 _VARIANTS = {st["variant"]: st["kwargs"] for st in load_default_schedule()}
@@ -88,13 +103,27 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
             msgs: List[Message] = list(row.messages)          # [system] from the dataset (the ONLY knob)
             row.messages = msgs
             num_instances = int(kwargs.get("num_instances", 30))
+            notepad = ""
             done = False
             for _scan in range(num_instances):
-                msgs.append(Message(role="user", content=query.prompt))
+                content = query.prompt
+                if NOTEPAD_MODE:
+                    content += ("\n=== YOUR NOTEPAD ===\n"
+                                + (notepad if notepad else "(empty)")
+                                + "\n(You cannot see earlier scans; the notepad above is the only thing that "
+                                  "persists. Update it via the notepad_update field of submit_report.)\n")
+                msgs.append(Message(role="user", content=content))
+                scan_user_idx = len(msgs) - 1
                 submitted = False
                 for _ in range(MAX_INNER_CALLS):
+                    if NOTEPAD_MODE:
+                        # bench icl_notepad default: context CLEARED between instances — the model sees only
+                        # [system] + the current instance's turns; the notepad is the sole carrier.
+                        src = [msgs[0]] + msgs[scan_user_idx:]
+                    else:
+                        src = msgs                            # ICL mode: FULL history
                     payload = []
-                    for m in msgs:                            # FULL history; strip think from PAST turns
+                    for m in src:                             # strip think from PAST assistant turns
                         d = m.model_dump()
                         if d.get("role") == "assistant" and d.get("content"):
                             d["content"] = THINK.sub("", d["content"]).strip()
@@ -129,6 +158,10 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
                             args = json.loads(fn.get("arguments") or "{}")
                         except Exception:
                             args = {}
+                        if NOTEPAD_MODE:
+                            nu = args.get("notepad_update")
+                            if isinstance(nu, str) and nu.strip():
+                                notepad = nu[:NOTEPAD_MAX]
                         cfs = [float(x) for x in (args.get("center_freqs") or [])][:SANITY_MAX_REPORT]
                         bws = [float(x) for x in (args.get("bandwidths") or [])][:SANITY_MAX_REPORT]
                         if len(bws) < len(cfs):               # tolerate ragged answers, don't invent widths
