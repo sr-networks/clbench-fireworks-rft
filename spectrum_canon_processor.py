@@ -47,7 +47,7 @@ THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 # ICL mode (full conversation history).
 NOTEPAD_MODE = os.environ.get("SPECTRUM_CANON_NOTEPAD") == "1"
 NOTEPAD_MAX = 4000
-print(f"[canon] processor v4 (robust calls; mode={'NOTEPAD' if NOTEPAD_MODE else 'ICL'})", flush=True)
+print(f"[canon] processor v5 (unkillable scans; mode={'NOTEPAD' if NOTEPAD_MODE else 'ICL'})", flush=True)
 
 _PROPS: Dict[str, Any] = {
     "center_freqs": {"type": "array", "items": {"type": "number"}},
@@ -145,49 +145,74 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
                         await asyncio.sleep(20 * (attempt + 1))
                     if am is None:
                         break  # -> force-advance below with an empty report
-                    tcs = [tc if isinstance(tc, dict) else tc.model_dump() for tc in (am.get("tool_calls") or [])]
-                    msgs.append(Message(role="assistant", content=am.get("content") or "", tool_calls=tcs or None))
+                    # UNKILLABLE: any malformed response / weird tool call / task hiccup degrades THIS turn,
+                    # never the rollout (the neutral-prompt jobs died from response-dependent exceptions that
+                    # escaped narrower guards — >20% dead rows aborts the whole job).
+                    try:
+                        tcs = [tc if isinstance(tc, dict) else tc.model_dump() for tc in (am.get("tool_calls") or [])]
+                        msgs.append(Message(role="assistant", content=am.get("content") or "", tool_calls=tcs or None))
+                    except Exception:
+                        tcs = []
                     if not tcs:
                         break
                     for tc in tcs:
-                        fn = tc.get("function", {})
-                        if fn.get("name") != "submit_report":
-                            msgs.append(Message(role="tool", content="(unknown tool)", tool_call_id=tc.get("id")))
-                            continue
                         try:
-                            args = json.loads(fn.get("arguments") or "{}")
+                            fn = tc.get("function") or {}
+                            if fn.get("name") != "submit_report":
+                                msgs.append(Message(role="tool", content="(unknown tool)", tool_call_id=tc.get("id")))
+                                continue
+                            try:
+                                args = json.loads(fn.get("arguments") or "{}")
+                            except Exception:
+                                args = {}
+                            if not isinstance(args, dict):
+                                args = {}
+                            if NOTEPAD_MODE:
+                                nu = args.get("notepad_update")
+                                if isinstance(nu, str) and nu.strip():
+                                    notepad = nu[:NOTEPAD_MAX]
+                            cfs, bws = [], []
+                            for x in (args.get("center_freqs") or [])[:SANITY_MAX_REPORT]:
+                                try:
+                                    cfs.append(float(x))
+                                except Exception:
+                                    pass
+                            for x in (args.get("bandwidths") or [])[:SANITY_MAX_REPORT]:
+                                try:
+                                    bws.append(float(x))
+                                except Exception:
+                                    pass
+                            bws = bws[:len(cfs)] + [8.0] * max(0, len(cfs) - len(bws))
+                            txs = [Transmitter(center_freq=c, bandwidth=b, currently_active=True, estimated_power=-30.0)
+                                   for c, b in zip(cfs, bws)]
+                            sr = task.step(Response(action=ScanReport(transmitters=txs), metadata={}))
+                            oc = getattr(sr, "instance_outcome", None)
+                            avail = float(getattr(oc, "reward", 0.0) or 0.0)   # THE bench metric
+                            try:
+                                occ = occ_iou(cfs, bws, gt)                    # diagnostic only
+                            except Exception:
+                                occ = 0.0
+                            msgs.append(Message(role="tool",
+                                                content=f"ok\nSCAN_AVAIL: {avail:.4f} SCAN_OCC: {occ:.4f}",
+                                                tool_call_id=tc.get("id")))
+                            submitted = True
+                            done = bool(sr.done)
+                            nq = getattr(sr, "next_query", None)
+                            if nq is not None:
+                                query = nq
                         except Exception:
-                            args = {}
-                        if NOTEPAD_MODE:
-                            nu = args.get("notepad_update")
-                            if isinstance(nu, str) and nu.strip():
-                                notepad = nu[:NOTEPAD_MAX]
-                        cfs = [float(x) for x in (args.get("center_freqs") or [])][:SANITY_MAX_REPORT]
-                        bws = [float(x) for x in (args.get("bandwidths") or [])][:SANITY_MAX_REPORT]
-                        if len(bws) < len(cfs):               # tolerate ragged answers, don't invent widths
-                            bws += [8.0] * (len(cfs) - len(bws))
-                        txs = [Transmitter(center_freq=c, bandwidth=b, currently_active=True, estimated_power=-30.0)
-                               for c, b in zip(cfs, bws)]
-                        sr = task.step(Response(action=ScanReport(transmitters=txs), metadata={}))
-                        oc = getattr(sr, "instance_outcome", None)
-                        avail = float(getattr(oc, "reward", 0.0) or 0.0)   # THE bench metric
-                        occ = occ_iou(cfs, bws, gt)                        # diagnostic only
-                        msgs.append(Message(role="tool",
-                                            content=f"ok\nSCAN_AVAIL: {avail:.4f} SCAN_OCC: {occ:.4f}",
-                                            tool_call_id=tc.get("id")))
-                        submitted = True
+                            msgs.append(Message(role="tool", content="(turn skipped)", tool_call_id=tc.get("id") if isinstance(tc, dict) else None))
+                    if submitted:
+                        break
+                if not submitted:                              # force-advance with an empty report
+                    try:
+                        sr = task.step(Response(action=ScanReport(transmitters=[]), metadata={}))
                         done = bool(sr.done)
                         nq = getattr(sr, "next_query", None)
                         if nq is not None:
                             query = nq
-                    if submitted:
-                        break
-                if not submitted:                              # force-advance with an empty report
-                    sr = task.step(Response(action=ScanReport(transmitters=[]), metadata={}))
-                    done = bool(sr.done)
-                    nq = getattr(sr, "next_query", None)
-                    if nq is not None:
-                        query = nq
+                    except Exception:
+                        break                                  # end the rollout gracefully; scans-so-far still score
                 if done:
                     break
 

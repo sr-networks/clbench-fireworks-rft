@@ -52,13 +52,23 @@ NP_NUDGE = (
     "Report ALL transmitters on your notepad every scan, not just the ones detected now."
 )
 
-PROMPTS = {"neutral": COMMON, "nudge": COMMON + NUDGE,
+# Reworded neutral (same semantics, different text): the original neutral text was empirically implicated in
+# the ICL-neutral job failures (probe: same evaluator + nudge dataset passes), mechanism unknown.
+NEUTRAL2 = (
+    "You are monitoring one radio-frequency band across a sequence of scans. Every scan shows the peaks a "
+    "noisy detector found, each with a frequency, a power and a width. For each scan, call the submit_report "
+    "tool with two same-length arrays: center_freqs, the center frequencies (MHz) of the regions you consider "
+    "occupied, and bandwidths, their widths (MHz). Your score reflects how closely your report matches the "
+    "band's true occupancy. Reason briefly — a sentence or two — before acting."
+)
+
+PROMPTS = {"neutral": COMMON, "nudge": COMMON + NUDGE, "neutral2": NEUTRAL2,
            "np-neutral": NP_COMMON, "np-nudge": NP_COMMON + NP_NUDGE}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt", choices=["neutral", "nudge", "np-neutral", "np-nudge"], required=True)
+    ap.add_argument("--prompt", choices=["neutral", "nudge", "neutral2", "np-neutral", "np-nudge"], required=True)
     ap.add_argument("--n", type=int, default=48)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
