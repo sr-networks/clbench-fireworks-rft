@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Memo — Training memory into a small LLM (Fireworks RFT × CLBench)</title>
+<style>
+ body { font: 16px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif; color:#1a1a1a; margin:0; background:#fafafa; }
+ .wrap { max-width: 880px; margin: 0 auto; padding: 40px 28px 80px; background:#fff; }
+ h1 { font-size: 26px; line-height:1.3; } h2 { font-size:21px; margin-top:2.2em; border-bottom:2px solid #e8e8e8; padding-bottom:6px; }
+ h3 { font-size:17px; margin-top:1.6em; }
+ .meta { color:#666; font-size: 13.5px; }
+ .hl { background:#f0f7ff; border-left:4px solid #1f6fb2; padding: 12px 16px; margin: 14px 0; }
+ .warn { background:#fff8ec; border-left:4px solid #d99a26; padding: 12px 16px; margin: 14px 0; }
+ table { border-collapse: collapse; width:100%; margin: 12px 0; font-size:14.5px; }
+ th,td { border:1px solid #ddd; padding:7px 10px; text-align:left; vertical-align:top; }
+ th { background:#f4f6f8; }
+ code, pre { font: 13px/1.45 "SF Mono", Menlo, Consolas, monospace; }
+ pre { background:#f6f8fa; border:1px solid #e4e7ea; border-radius:6px; padding:12px 14px; overflow-x:auto; white-space:pre-wrap; }
+ .prompt { background:#f4fff4; border-color:#cde8cd; }
+ .roll { background:#fbf9f4; border-color:#eae2cf; }
+ .chart { width:100%; height:auto; margin: 8px 0 4px; }
+ .tick { font-size:11px; fill:#888; } .lab { font-size:12.5px; fill:#444; } .leg { font-size:12px; fill:#333; } .ref { font-size:11px; }
+ .cap { font-size:13px; color:#666; margin: 2px 0 18px; }
+ .runid { font-family: Menlo, monospace; font-size: 12.5px; color:#555; }
+ li { margin: 4px 0; }
+</style></head><body><div class="wrap">
+
+<h1>Training <em>memory</em> into a small LLM — and proving it isn&rsquo;t knowledge or skill</h1>
+<p class="meta">Project memo · Qwen3-1.7B · Fireworks Reinforcement Fine-Tuning (GRPO) · task derived from CLBench
+<code>blind_spectrum_monitoring</code> · July&nbsp;2026 · repo: <code>sr-networks/clbench-fireworks-rft</code></p>
+
+<div class="hl"><b>Headline.</b> Reinforcement learning (GRPO) <b>reproducibly improves the model&rsquo;s memory
+recall</b> — the fraction of its remembered state it carries forward each step — from ≈0.89 to ≈0.94 in two
+independent runs, on task content that <b>never repeats</b> (so nothing can be memorised into the weights),
+against a <b>scrambled-memory control that stayed flat</b> (so non-memory skill gains are excluded).
+The effect is small at the score level, and it does <b>not</b> beat what one paragraph of explicit instruction
+installs for free: at this model size, <i>prompting&nbsp;≻&nbsp;RL</i> for memory use — and RL actively
+<i>destroys</i> memory the model must maintain itself.</div>
+
+<h2>1 · Background: the benchmark we start from</h2>
+<p><a href="https://github.com/sr-networks/continual-learning-bench">CLBench</a> tests whether an agent
+<i>learns during a task</i>: it runs a model through a long series of task instances and measures whether late
+instances are handled better than early ones. Its <b>systems</b> differ only in how memory is provided:</p>
+<table>
+<tr><th>CLBench system</th><th>Definition (from source)</th></tr>
+<tr><td><code>icl</code></td><td><i>&ldquo;Accumulates all interactions in a linear context window with token-based
+truncation from the start (FIFO)&hellip; maintains a conversation history as a list of messages&hellip; observations
+are prepended to the next query so the LLM sees feedback in context.&rdquo;</i> — i.e. <b>full-history replay</b>;
+nothing is summarised, the oldest turns fall off when the context overflows.</td></tr>
+<tr><td><code>icl_notepad</code></td><td><i>&ldquo;ICL system with notepad&hellip; the model can maintain a notepad to
+jot down important observations, patterns and thoughts that persist across interactions.&rdquo;</i> — the model
+re-writes a free-text notepad each turn; the notepad persists, conversation may be cleared between instances.</td></tr>
+</table>
+<p><b>The task</b> (<code>blind_spectrum_monitoring</code>): a hidden radio band contains ~11&ndash;14 transmitters
+(8&nbsp;MHz each in 0&ndash;180&nbsp;MHz). Each <i>scan</i> reveals only the ~3 currently-active transmitters, as noisy
+detector peaks (miss rate 0.15, false-alarm rate 0.2). The rest are <b>dormant — still occupying the band, just
+silent this scan</b>. The agent must report <i>all</i> occupied regions; dormant transmitters can only come from
+memory. CLBench&rsquo;s official schedule: 90 instances across 3 stages, scored by <b>available-spectrum IoU</b>.</p>
+
+<h2>2 · Our adaptation for RL training</h2>
+<p>We turn one <i>session</i> into one RL <b>rollout</b>: 12 scans of one hidden band. The model answers each scan
+with a <code>submit_report(center_freqs)</code> tool call; the environment scores it and delivers the next scan.</p>
+<h3>2.1 The metrics, defined</h3>
+<p>Both metrics score the <b>same report</b> against the same hidden ground truth; they differ in which side of the
+band they compare. Let the band be the interval [0,&nbsp;180]&nbsp;MHz and measure set sizes in MHz:</p>
+<ul>
+<li><b>True occupied</b> O* = the union of all transmitters&rsquo; 8-MHz intervals — <i>dormant ones included</i>
+(~12 &times; 8 ≈ 96&nbsp;MHz). <b>True available</b> A* = band \ O* (≈ 84&nbsp;MHz).</li>
+<li>A report of center frequencies implies <b>claimed occupied</b> O = the union of 8-MHz intervals at the reported
+centers, and by complement <b>claimed available</b> A = band \ O.</li>
+</ul>
+<pre>occupied-IoU  =  |O ∩ O*| / |O ∪ O*|          available-IoU  =  |A ∩ A*| / |A ∪ A*|</pre>
+<svg viewBox="0 0 680 190" class="chart"><rect x="70" y="22" width="594" height="16" fill="#f0f0f0" rx="2"/><rect x="96.4" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="145.9" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="202.0" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="248.2" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="297.7" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="347.2" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="390.1" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="442.9" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="485.8" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="538.6" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="581.5" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><rect x="624.4" y="22" width="26.4" height="16" fill="#5b8db8" rx="2"/><text x="64" y="34" text-anchor="end" class="leg">true occupied O*  (96 MHz)</text><rect x="70" y="52" width="594" height="16" fill="#f0f0f0" rx="2"/><rect x="202.0" y="52" width="26.4" height="16" fill="#27ae60" rx="2"/><rect x="390.1" y="52" width="26.4" height="16" fill="#27ae60" rx="2"/><rect x="538.6" y="52" width="26.4" height="16" fill="#27ae60" rx="2"/><text x="64" y="64" text-anchor="end" class="leg">report → claimed O  (24 MHz)</text><rect x="70" y="82" width="594" height="16" fill="#d9e8d9" rx="2"/><rect x="96.4" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="145.9" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="202.0" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="248.2" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="297.7" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="347.2" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="390.1" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="442.9" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="485.8" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="538.6" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="581.5" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="624.4" y="82" width="26.4" height="16" fill="#ffffff" rx="2"/><text x="64" y="94" text-anchor="end" class="leg">true available A* (84 MHz)</text><rect x="70" y="112" width="594" height="16" fill="#d9e8d9" rx="2"/><rect x="202.0" y="112" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="390.1" y="112" width="26.4" height="16" fill="#ffffff" rx="2"/><rect x="538.6" y="112" width="26.4" height="16" fill="#ffffff" rx="2"/><text x="64" y="124" text-anchor="end" class="leg">claimed available A (156 MHz)</text><text x="70" y="152" class="leg">occupied-IoU = |O∩O*|/|O∪O*| = 24/96 ≈ 0.25 &nbsp;&nbsp;&nbsp; available-IoU = |A∩A*|/|A∪A*| = 84/156 ≈ 0.54</text><text x="70" y="170" class="leg">(the 9 forgotten dormant transmitters barely dent the available side — they crush the occupied side)</text></svg>
+<p class="cap"><b>Fig 0 — the two metrics on one example.</b> A memoryless report (3 current peaks, 24 MHz) against a
+12-transmitter ground truth. Occupied-IoU compares the thin report to the full transmitter map: 24/96 ≈ 0.25
+(detector noise → ≈0.16). Available-IoU compares the complements: the true free space (84 MHz) is almost entirely
+inside the claimed free space (156 MHz), giving 84/156 ≈ 0.54 <i>despite total amnesia</i> — each forgotten dormant
+transmitter costs 8 MHz out of a ~96-MHz target on the occupied side, but only nudges a ~156-MHz union on the
+available side. That asymmetry is the entire reason we train on occupied-IoU.</p>
+<table>
+<tr><th></th><th>bench metric: available-IoU</th><th>ours: occupied-IoU (<code>SCAN_OCC</code>)</th></tr>
+<tr><td>what it asks</td><td>&ldquo;did you map the <i>empty</i> spectrum?&rdquo;</td><td>&ldquo;did you find every transmitter, incl. sleeping ones?&rdquo;</td></tr>
+<tr><td>memoryless agent</td><td>≈ 0.47 (the band is mostly empty — saying little is nearly right)</td><td>≈ 0.16</td></tr>
+<tr><td>perfect memory</td><td>≈ 0.55</td><td>0.45&ndash;0.55 (noise-limited, see §8)</td></tr>
+<tr><td>verdict</td><td><b>memory-insensitive</b> — unusable as a training signal</td><td><b>memory is the whole signal</b> (≈3&times; range)</td></tr>
+</table>
+<p><b>Reward</b> = 3 &times; mean occupied-IoU over the rollout. <b><code>memory_gain</code></b> = (occ of late half)
+&minus; (occ of early half) is <i>measured but never rewarded</i> — rewarding a delta invites sandbagging (tank the
+early scans, &ldquo;improve&rdquo; later).</p>
+
+<h3>2.2 The memory channel (&ldquo;running-list echo&rdquo;)</h3>
+<p>The context is <b>windowed to the current scan</b> (the model cannot re-read earlier scans — bench-ICL is
+switched <i>off</i>). Instead, every scan carries an echo of the model&rsquo;s <b>own previous answer</b>:</p>
+<pre class="prompt">=== YOUR RUNNING LIST (your previous report) ===
+19.8, 42.2, 52.4, 138.9, 150.7
+Keep ALL of these, add any NEW peaks from this scan, and submit the FULL updated list.</pre>
+<p>This is a notepad with the write-policy hard-wired to <i>&ldquo;notepad&nbsp;:= my last answer&rdquo;</i>: storage and
+retrieval are free, only <b>use</b> (keep&nbsp;+&nbsp;merge) is the model&rsquo;s job. That isolates the one competency
+we measure. Where the model must also <i>maintain</i> the memory (notepad tools), see §9.</p>
+
+<h2>3 · The threat model: what could fake &ldquo;memory training&rdquo;</h2>
+<table>
+<tr><th>confound</th><th>how it fakes memory</th><th>our counter-measure</th></tr>
+<tr><td><b>knowledge</b> (content baking)</td><td>the same band layouts recur across training; the model memorises them in its weights and &ldquo;recalls&rdquo; without memory</td><td><b>epoch-salting</b>: a fresh random band <i>set</i> every epoch — no band is ever seen twice; every epoch is automatically a fresh-content evaluation. (This mattered: <i>all</i> our pre-rigor runs had unknowingly reused the same 48 bands.)</td></tr>
+<tr><td><b>skill</b> (non-memory mechanics)</td><td>RL improves JSON formatting, peak transcription, verbosity — score rises without memory</td><td><b>scrambled-memory control arm</b>: identical training, but the echoed list is replaced by random frequencies (same count/format/instruction). Whatever survives scrambling is skill.</td></tr>
+<tr><td><b>luck / cherry-picking</b></td><td>a single noisy curve is declared a trend</td><td>trend = halves&nbsp;+&nbsp;slope&nbsp;+&nbsp;R&sup2;, plus an independent <b>replication run</b>; behaviour measured directly from traces (<b>carry-rate</b> = fraction of the echoed list preserved in the next report).</td></tr>
+</table>
+<p>GRPO detail that makes any of this work: the 12 reward-compared candidates of a dataset row must face the
+<b>same band</b> (seeded per row), otherwise advantages measure band luck, not policy — with fully random bands the
+policy provably never moves (our first six runs were flat for exactly this reason).</p>
+
+<h2>4 · The runs</h2>
+<table>
+<tr><th>run</th><th>arm</th><th>prompt</th><th>memory echo</th><th>12 epochs, lr 1e-4 &middot; outcome</th></tr>
+<tr><td class="runid">tnfxdqkv</td><td>probe</td><td>explicit</td><td>real</td><td>lr≈0 → base policy on two fresh band sets: occ 0.452 / 0.474 (band-noise ±0.02)</td></tr>
+<tr><td class="runid">fva3tx6z</td><td><b>A</b></td><td>explicit</td><td>real</td><td>occ <b>0.472, flat</b> — behaviour saturated by the prompt (carry 0.967)</td></tr>
+<tr><td class="runid">geote9qj</td><td><b>B</b></td><td>explicit</td><td><b>scrambled</b></td><td>occ <b>0.356, flat</b>; gain flat — <b>zero</b> skill drift in 12 epochs</td></tr>
+<tr><td class="runid">dtbn6lhm</td><td><b>C</b></td><td><b>weak</b></td><td>real</td><td>occ 0.403→0.439 (slope +0.0037/ep, R&sup2;=0.65) · <b>carry 0.888→0.938</b></td></tr>
+<tr><td class="runid">c4jk2e4z</td><td><b>C&prime;</b></td><td>weak</td><td>real</td><td>replicate: occ 0.401→0.425 (slope +0.0019/ep) · <b>carry 0.900→0.935</b></td></tr>
+</table>
+<p>&ldquo;Explicit&rdquo; vs &ldquo;weak&rdquo; prompt is the experiment&rsquo;s instruction knob — §5 shows both verbatim.
+All runs: 48 rows &times; 12 GRPO candidates &times; 12 scans, temperature 1.2, 4096 output tokens, brief thinking.</p>
+
+<h2>5 · The prompts (verbatim)</h2>
+<h3>5.1 Explicit scaffold prompt (arms A, B) — teaches accumulation</h3>
+<pre class="prompt">You are a spectrum-monitoring analyst watching ONE fixed radio-frequency band over a SERIES of scans, shown ONE AT A TIME. Each scan lists noisy detected peaks (frequency, power, width).
+
+KEY FACT: transmitters do NOT go away. A transmitter that is silent (dormant) in one scan is STILL occupying the band and will often reappear later. You are scored on how well your report matches the band&#x27;s TRUE occupied spectrum, which includes every dormant transmitter — so report EVERY transmitter you have ever seen, not just the ones detected in the current scan.
+
+You cannot look back at earlier scans. To help you, each scan includes YOUR RUNNING LIST — the report you submitted for the previous scan. Keep ALL of it, add any NEW peaks from the current scan, and submit the FULL updated list via submit_report(center_freqs) (each region is a fixed 8 MHz wide; it returns the next scan).
+
+Think BRIEFLY, then act — keep your reasoning to a sentence or two, do not over-explain.</pre>
+<h3>5.2 Weak scaffold prompt (arms C, C&prime;) — task only, accumulation NOT taught</h3>
+<pre class="prompt">You are a spectrum-monitoring analyst watching ONE fixed radio-frequency band over a SERIES of scans, shown ONE AT A TIME. Each scan lists noisy detected peaks (frequency, power, width). Each scan, report the center frequencies (MHz) of the transmitter regions that occupy the band via submit_report(center_freqs) (each region is a fixed 8 MHz wide; it returns the next scan). You are scored on how well your reported regions match the band&#x27;s true occupied spectrum.
+
+You cannot look back at earlier scans. Each scan includes YOUR RUNNING LIST — the report you submitted for the previous scan.
+
+Think BRIEFLY, then act — keep your reasoning to a sentence or two, do not over-explain.</pre>
+<p class="cap">The only remaining nudge in the weak arms is the echo block&rsquo;s own &ldquo;keep all + add new&rdquo; line (§2.2),
+which is part of the channel itself. The difference A&minus;C at epoch&nbsp;0 (0.472 vs 0.403) is therefore
+<i>what the explicit paragraph buys</i>.</p>
+<h3>5.3 The earlier notepad-tools prompt (for §9), deliberately vague variant</h3>
+<pre class="prompt">You are a spectrum-monitoring analyst watching ONE fixed radio-frequency band over a SERIES of scans, shown ONE AT A TIME. Each scan lists noisy detected peaks (frequency, power, width).
+
+KEY FACT: transmitters do NOT go away. A transmitter that is silent (dormant) in one scan is STILL occupying the band — it just wasn&#x27;t detected this scan, and it will often reappear later. Only some transmitters are active in any given scan; the rest are dormant but STILL PRESENT. You are scored on how well your report matches the band&#x27;s TRUE occupied spectrum, which includes every dormant transmitter. So you must report EVERY transmitter you have &hellip;</pre>
+
+<h2>6 · An exemplary rollout (real trace, Arm C epoch 0)</h2>
+<pre class="roll">[system]  (weak scaffold prompt — see §5)
+
+[user]  [[SCAN_BOUNDARY]] NEW SCAN — you cannot see earlier scans. Your only memory of them is the
+        RUNNING LIST shown with this scan.
+        --- Scan 1/12 ---
+        Detected peaks:
+          - freq: 110.7 MHz | power: -28.4 dBm | width: 7.9 MHz
+          - freq: 143.6 MHz | power: -26.1 dBm | width: 8.7 MHz
+          - freq: 158.2 MHz | power: -30.2 dBm | width: 7.0 MHz
+        Band: 0.0-180.0 MHz.  Submit your report.
+
+[assistant·think]  The detected peaks are at 110.7, 143.6 and 158.2 MHz ... report these three.
+[assistant]  submit_report({&quot;center_freqs&quot;: [110.7, 143.6, 158.2]})
+[tool]  ok
+        SCAN_OCC: 0.1421 SCAN_AVAIL: 0.4179
+
+[user]  [[SCAN_BOUNDARY]] NEW SCAN — ...
+        --- Scan 2/12 ---
+        Detected peaks:
+          - freq: 31.5 MHz | ...     - freq: 89.4 MHz | ...
+        === YOUR RUNNING LIST (your previous report) ===
+        110.7, 143.6, 158.2
+        Keep ALL of these, add any NEW peaks from this scan, and submit the FULL updated list.
+
+[assistant·think]  Keep 110.7, 143.6, 158.2 from the list; add the new peaks 31.5 and 89.4.
+[assistant]  submit_report({&quot;center_freqs&quot;: [31.5, 89.4, 110.7, 143.6, 158.2]})
+[tool]  ok
+        SCAN_OCC: 0.2437 SCAN_AVAIL: 0.4444
+
+        ... scans 3-12 continue: the list grows as dormant transmitters accumulate ...
+
+[eval]  scans=12; mean_occ=0.353; early_occ=0.335; late_occ=0.371; memory_gain=+0.036; score=1.058</pre>
+<p class="cap">Note the mechanics: the next scan arrives as a <b>user</b> turn; the echo carries the previous answer;
+<code>SCAN_OCC</code> is the per-scan score the reward parser reads (windowed away from later decisions). &ldquo;Memory use&rdquo;
+is visible as the report growing while old frequencies persist. The <b>carry-rate</b> instrument counts exactly that:
+what fraction of the echoed list survives into the next report.</p>
+
+<h2>7 · Results</h2>
+<svg viewBox="0 0 680 380" class="chart"><line x1="62" y1="334.0" x2="660" y2="334.0" stroke="#eee"/><text x="56" y="338.0" text-anchor="end" class="tick">0.30</text><line x1="62" y1="288.9" x2="660" y2="288.9" stroke="#eee"/><text x="56" y="292.9" text-anchor="end" class="tick">0.34</text><line x1="62" y1="243.7" x2="660" y2="243.7" stroke="#eee"/><text x="56" y="247.7" text-anchor="end" class="tick">0.38</text><line x1="62" y1="198.6" x2="660" y2="198.6" stroke="#eee"/><text x="56" y="202.6" text-anchor="end" class="tick">0.42</text><line x1="62" y1="153.4" x2="660" y2="153.4" stroke="#eee"/><text x="56" y="157.4" text-anchor="end" class="tick">0.46</text><line x1="62" y1="108.3" x2="660" y2="108.3" stroke="#eee"/><text x="56" y="112.3" text-anchor="end" class="tick">0.50</text><line x1="62" y1="63.1" x2="660" y2="63.1" stroke="#eee"/><text x="56" y="67.1" text-anchor="end" class="tick">0.54</text><text x="62.0" y="350" text-anchor="middle" class="tick">0</text><text x="116.4" y="350" text-anchor="middle" class="tick">1</text><text x="170.7" y="350" text-anchor="middle" class="tick">2</text><text x="225.1" y="350" text-anchor="middle" class="tick">3</text><text x="279.5" y="350" text-anchor="middle" class="tick">4</text><text x="333.8" y="350" text-anchor="middle" class="tick">5</text><text x="388.2" y="350" text-anchor="middle" class="tick">6</text><text x="442.5" y="350" text-anchor="middle" class="tick">7</text><text x="496.9" y="350" text-anchor="middle" class="tick">8</text><text x="551.3" y="350" text-anchor="middle" class="tick">9</text><text x="605.6" y="350" text-anchor="middle" class="tick">10</text><text x="660.0" y="350" text-anchor="middle" class="tick">11</text><text x="361.0" y="372" text-anchor="middle" class="lab">epoch</text><text x="14" y="176.0" class="lab" transform="rotate(-90 14 176.0)" text-anchor="middle">mean occupied-IoU</text><line x1="62" y1="168.1" x2="660" y2="168.1" stroke="#999" stroke-dasharray="6 4" stroke-width="1.4"/><text x="656" y="163.1" text-anchor="end" class="ref" fill="#999">naive-oracle 0.447</text><line x1="62" y1="93.6" x2="660" y2="93.6" stroke="#bbb" stroke-dasharray="6 4" stroke-width="1.4"/><text x="656" y="88.6" text-anchor="end" class="ref" fill="#bbb">+FA-filter 0.513</text><line x1="62" y1="53.0" x2="660" y2="53.0" stroke="#ccc" stroke-dasharray="6 4" stroke-width="1.4"/><text x="656" y="48.0" text-anchor="end" class="ref" fill="#ccc">+denoise 0.549</text><polyline points="62.0,137.6 116.4,137.6 170.7,134.2 225.1,153.4 279.5,148.9 333.8,148.9 388.2,147.8 442.5,130.9 496.9,130.9 551.3,129.7 605.6,141.0 660.0,142.1" fill="none" stroke="#1f6fb2" stroke-width="2.6"/><circle cx="62.0" cy="137.6" r="3" fill="#1f6fb2"/><circle cx="116.4" cy="137.6" r="3" fill="#1f6fb2"/><circle cx="170.7" cy="134.2" r="3" fill="#1f6fb2"/><circle cx="225.1" cy="153.4" r="3" fill="#1f6fb2"/><circle cx="279.5" cy="148.9" r="3" fill="#1f6fb2"/><circle cx="333.8" cy="148.9" r="3" fill="#1f6fb2"/><circle cx="388.2" cy="147.8" r="3" fill="#1f6fb2"/><circle cx="442.5" cy="130.9" r="3" fill="#1f6fb2"/><circle cx="496.9" cy="130.9" r="3" fill="#1f6fb2"/><circle cx="551.3" cy="129.7" r="3" fill="#1f6fb2"/><circle cx="605.6" cy="141.0" r="3" fill="#1f6fb2"/><circle cx="660.0" cy="142.1" r="3" fill="#1f6fb2"/><polyline points="62.0,275.3 116.4,276.4 170.7,277.6 225.1,270.8 279.5,271.9 333.8,266.3 388.2,262.9 442.5,275.3 496.9,266.3 551.3,269.7 605.6,267.4 660.0,268.5" fill="none" stroke="#c0392b" stroke-width="2.6"/><circle cx="62.0" cy="275.3" r="3" fill="#c0392b"/><circle cx="116.4" cy="276.4" r="3" fill="#c0392b"/><circle cx="170.7" cy="277.6" r="3" fill="#c0392b"/><circle cx="225.1" cy="270.8" r="3" fill="#c0392b"/><circle cx="279.5" cy="271.9" r="3" fill="#c0392b"/><circle cx="333.8" cy="266.3" r="3" fill="#c0392b"/><circle cx="388.2" cy="262.9" r="3" fill="#c0392b"/><circle cx="442.5" cy="275.3" r="3" fill="#c0392b"/><circle cx="496.9" cy="266.3" r="3" fill="#c0392b"/><circle cx="551.3" cy="269.7" r="3" fill="#c0392b"/><circle cx="605.6" cy="267.4" r="3" fill="#c0392b"/><circle cx="660.0" cy="268.5" r="3" fill="#c0392b"/><polyline points="62.0,217.8 116.4,239.2 170.7,215.5 225.1,226.8 279.5,205.3 333.8,199.7 388.2,197.4 442.5,180.5 496.9,208.7 551.3,203.1 605.6,185.0 660.0,177.1" fill="none" stroke="#27ae60" stroke-width="2.6"/><circle cx="62.0" cy="217.8" r="3" fill="#27ae60"/><circle cx="116.4" cy="239.2" r="3" fill="#27ae60"/><circle cx="170.7" cy="215.5" r="3" fill="#27ae60"/><circle cx="225.1" cy="226.8" r="3" fill="#27ae60"/><circle cx="279.5" cy="205.3" r="3" fill="#27ae60"/><circle cx="333.8" cy="199.7" r="3" fill="#27ae60"/><circle cx="388.2" cy="197.4" r="3" fill="#27ae60"/><circle cx="442.5" cy="180.5" r="3" fill="#27ae60"/><circle cx="496.9" cy="208.7" r="3" fill="#27ae60"/><circle cx="551.3" cy="203.1" r="3" fill="#27ae60"/><circle cx="605.6" cy="185.0" r="3" fill="#27ae60"/><circle cx="660.0" cy="177.1" r="3" fill="#27ae60"/><polyline points="62.0,209.9 116.4,218.9 170.7,215.5 225.1,233.6 279.5,224.5 333.8,214.4 388.2,214.4 442.5,231.3 496.9,198.6 551.3,194.1 605.6,205.3 660.0,192.9" fill="none" stroke="#8e44ad" stroke-width="2.6"/><circle cx="62.0" cy="209.9" r="3" fill="#8e44ad"/><circle cx="116.4" cy="218.9" r="3" fill="#8e44ad"/><circle cx="170.7" cy="215.5" r="3" fill="#8e44ad"/><circle cx="225.1" cy="233.6" r="3" fill="#8e44ad"/><circle cx="279.5" cy="224.5" r="3" fill="#8e44ad"/><circle cx="333.8" cy="214.4" r="3" fill="#8e44ad"/><circle cx="388.2" cy="214.4" r="3" fill="#8e44ad"/><circle cx="442.5" cy="231.3" r="3" fill="#8e44ad"/><circle cx="496.9" cy="198.6" r="3" fill="#8e44ad"/><circle cx="551.3" cy="194.1" r="3" fill="#8e44ad"/><circle cx="605.6" cy="205.3" r="3" fill="#8e44ad"/><circle cx="660.0" cy="192.9" r="3" fill="#8e44ad"/><rect x="74" y="20" width="14" height="4" fill="#1f6fb2"/><text x="92" y="26" class="leg">A · explicit + real</text><rect x="268" y="20" width="14" height="4" fill="#c0392b"/><text x="286" y="26" class="leg">B · explicit + scrambled</text><rect x="502" y="20" width="14" height="4" fill="#27ae60"/><text x="520" y="26" class="leg">C · weak + real</text><rect x="664" y="20" width="14" height="4" fill="#8e44ad"/><text x="682" y="26" class="leg">C′ · weak + real (replicate)</text></svg>
+<p class="cap"><b>Fig 1 — mean occupied-IoU per epoch, all four arms (bands never repeat across epochs).</b>
+A flat at the instructed level; B flat (control); C and C&prime; drift upward from the weak base toward A.</p>
+<svg viewBox="0 0 560 300" class="chart"><line x1="62" y1="248.0" x2="544" y2="248.0" stroke="#eee"/><text x="56" y="252.0" text-anchor="end" class="tick">0.84</text><line x1="62" y1="190.5" x2="544" y2="190.5" stroke="#eee"/><text x="56" y="194.5" text-anchor="end" class="tick">0.88</text><line x1="62" y1="133.0" x2="544" y2="133.0" stroke="#eee"/><text x="56" y="137.0" text-anchor="end" class="tick">0.92</text><line x1="62" y1="75.5" x2="544" y2="75.5" stroke="#eee"/><text x="56" y="79.5" text-anchor="end" class="tick">0.96</text><line x1="62" y1="18.0" x2="544" y2="18.0" stroke="#eee"/><text x="56" y="22.0" text-anchor="end" class="tick">1.00</text><rect x="90.9" y="65.4" width="41.8" height="182.6" fill="#9db2c9"/><text x="111.8" y="60.4" text-anchor="middle" class="leg">0.967</text><rect x="140.7" y="58.3" width="41.8" height="189.7" fill="#1f6fb2"/><text x="161.6" y="53.3" text-anchor="middle" class="leg">0.972</text><text x="142.3" y="274" text-anchor="middle" class="lab">A (explicit)</text><rect x="251.6" y="179.0" width="41.8" height="69.0" fill="#9db2c9"/><text x="272.5" y="174.0" text-anchor="middle" class="leg">0.888</text><rect x="301.4" y="107.1" width="41.8" height="140.9" fill="#1f6fb2"/><text x="322.2" y="102.1" text-anchor="middle" class="leg">0.938</text><text x="303.0" y="274" text-anchor="middle" class="lab">C (weak)</text><rect x="412.3" y="161.7" width="41.8" height="86.3" fill="#9db2c9"/><text x="433.1" y="156.7" text-anchor="middle" class="leg">0.900</text><rect x="462.0" y="111.4" width="41.8" height="136.6" fill="#1f6fb2"/><text x="482.9" y="106.4" text-anchor="middle" class="leg">0.935</text><text x="463.7" y="274" text-anchor="middle" class="lab">C′ (weak, replicate)</text><rect x="72" y="18" width="12" height="12" fill="#9db2c9"/><text x="88" y="28" class="leg">epoch 0</text><rect x="158" y="18" width="12" height="12" fill="#1f6fb2"/><text x="174" y="28" class="leg">epoch 11</text><text x="14" y="133.0" class="lab" transform="rotate(-90 14 133.0)" text-anchor="middle">carry-rate (recall)</text></svg>
+<p class="cap"><b>Fig 2 — the behavioural instrument: carry-rate (recall) at epoch 0 vs epoch 11.</b> The weak arms
+improve recall by +0.05 / +0.035, converging to ≈0.94; the explicit arm starts saturated (0.967).</p>
+
+<h3>Finding 1 — RL trains memory recall <span class="runid">(C + C&prime;)</span></h3>
+<p>From the weak base, GRPO improved recall in <b>both</b> independent runs (carry 0.888→0.938, 0.900→0.935; report
+size 12.0→14.5 / 12.9→13.5; occ slopes +0.0037 and +0.0019/ep, both runs ending at their maximum). On
+never-repeating bands with the scrambled arm flat, the improvement can only be policy-level memory use.
+Honest weights: the score-level effect is small (+0.012&ndash;0.022 by halves vs ±0.02 band noise — it clears the
+bar via slope consistency and the behavioural measure, not magnitude); <code>memory_gain</code> rose in C but not
+C&prime; (it is the noisiest instrument); 12 epochs did not reach the instruction ceiling.</p>
+<h3>Finding 2 — the causal chain, measured at every link</h3>
+<p>Within a GRPO group (same band): candidates differ behaviourally (sd(carry)=0.073) → reward ranks that behaviour
+(<b>corr(carry,&nbsp;reward) = +0.75&hellip;+0.80</b> — the reward design was <i>never</i> the bottleneck) → the policy
+moves along the paid gradient (carry rises). </p>
+<h3>Finding 3 — instruction beats RL at this scale <span class="runid">(A + saturation diagnosis)</span></h3>
+<p>The explicit paragraph alone installs occ 0.452&ndash;0.474 — above every RL-trained level in this project and
+above the naive accumulate-everything oracle (0.447): the instructed model already <i>curates</i> (filters false
+alarms). Its carry is 0.967 with reports at the 16-slot cap: <b>saturated</b>. Arm A&rsquo;s flat curve means
+&ldquo;no headroom&rdquo;, not &ldquo;RL can&rsquo;t learn&rdquo; — the sliver that existed, RL took (0.967→0.972).</p>
+<h3>Finding 4 — RL preserves cheap memory, erodes expensive memory <span class="runid">(§9)</span></h3>
+<p>With the env maintaining the channel, RL held (A) or improved (C/C&prime;) the behaviour. With memory as the
+agent&rsquo;s own job (notepad tools), the same optimizer <b>eroded</b> it (20 epochs: gain +0.055&nbsp;→&nbsp;&minus;0.008,
+occ → memoryless floor): when memory upkeep costs actions, the policy drifts to the cheaper memoryless strategy.</p>
+
+<h2>8 · Where the ceiling is</h2>
+<table>
+<tr><th>policy</th><th>requires</th><th>occ</th></tr>
+<tr><td>report the true layout</td><td>omniscience (scorer sanity check)</td><td>1.000</td></tr>
+<tr><td>accumulate + perfect false-alarm filter + centre averaging</td><td>cheat knowledge of which peaks are phantom</td><td>0.549</td></tr>
+<tr><td>accumulate + perfect false-alarm filter</td><td>&#8221;</td><td>0.513</td></tr>
+<tr><td><b>instructed model (A)</b></td><td>recall + partial curation</td><td><b>0.472</b></td></tr>
+<tr><td>naive oracle: accumulate <i>every</i> detection</td><td>perfect recall, zero judgment</td><td>0.447</td></tr>
+<tr><td><b>RL-trained from weak base (C)</b></td><td>mostly recall</td><td><b>0.439</b></td></tr>
+<tr><td>weak-prompt base</td><td>&mdash;</td><td>0.403</td></tr>
+<tr><td>scrambled memory (B)</td><td>&mdash;</td><td>0.356</td></tr>
+<tr><td>memoryless</td><td>&mdash;</td><td>≈0.16</td></tr>
+</table>
+<p class="cap">Detector noise compresses everything: a real agent&rsquo;s ceiling is ≈0.50&ndash;0.55. The instructed model has
+already banked most of the recall value plus some curation; the remaining headroom is in curation subtleties
+(drop never-reseen entries, average sighting positions).</p>
+
+<h2>9 · The earlier chapter: agent-managed notepad (why &ldquo;use&rdquo; vs &ldquo;maintenance&rdquo; matters)</h2>
+<p>Before the echo design we gave the model actual memory <i>tools</i> — <code>notepad_read()</code> /
+<code>notepad_write(text)</code> — with context windowed per scan, so the notepad was its only memory.</p>
+<ul>
+<li><b>Vague prompt</b> (&ldquo;memory is useful, decide what to store&rdquo;): the model <i>never explores</i> accumulation —
+it treats every scan as an independent question. Real trace (thinking model):</li>
+</ul>
+<pre class="roll">[user]   --- Scan 3/12 --- ...  (notepad tools available: notepad_read / notepad_write)
+[assistant·think]  &quot;... the current scan is the third scan, but the user hasn&#x27;t provided any previous data.
+                    So the notepad is empty initially. So I can just process this scan without any prior
+                    data. ... the detected peak is at 84.5 MHz ... call submit_report with [84.5].&quot;
+[assistant]  submit_report({&quot;center_freqs&quot;: [84.5]})     &lt;-- reports ONLY the current scan, never writes
+[tool]   ok   SCAN_OCC: 0.0574                                the notepad; occ stays at the memoryless floor</pre>
+<ul>
+<li>Result: 10 epochs at the memoryless floor (occ ≈0.16, gain ≈0) in <b>two</b> rollout interfaces, thinking on and
+off — an <i>exploration failure</i>: GRPO never sees an accumulating rollout it could reinforce.</li>
+<li><b>Explicit prompt</b> unlocks the notepad instantly (occ ≈0.28, gain +0.05, reproduced 3&times;) — but RL never
+improved it, and a 20-epoch run <b>destroyed</b> it (gain +0.055 → &minus;0.008). Cutting corners on memory upkeep is
+the locally-cheaper policy, and prolonged optimisation finds it.</li>
+</ul>
+<svg viewBox="0 0 680 380" class="chart"><line x1="62" y1="334.0" x2="660" y2="334.0" stroke="#eee"/><text x="56" y="338.0" text-anchor="end" class="tick">-0.02</text><line x1="62" y1="249.7" x2="660" y2="249.7" stroke="#eee"/><text x="56" y="253.7" text-anchor="end" class="tick">0.02</text><line x1="62" y1="165.5" x2="660" y2="165.5" stroke="#eee"/><text x="56" y="169.5" text-anchor="end" class="tick">0.06</text><line x1="62" y1="81.2" x2="660" y2="81.2" stroke="#eee"/><text x="56" y="85.2" text-anchor="end" class="tick">0.10</text><text x="62.0" y="350" text-anchor="middle" class="tick">0</text><text x="93.5" y="350" text-anchor="middle" class="tick">1</text><text x="124.9" y="350" text-anchor="middle" class="tick">2</text><text x="156.4" y="350" text-anchor="middle" class="tick">3</text><text x="187.9" y="350" text-anchor="middle" class="tick">4</text><text x="219.4" y="350" text-anchor="middle" class="tick">5</text><text x="250.8" y="350" text-anchor="middle" class="tick">6</text><text x="282.3" y="350" text-anchor="middle" class="tick">7</text><text x="313.8" y="350" text-anchor="middle" class="tick">8</text><text x="345.3" y="350" text-anchor="middle" class="tick">9</text><text x="376.7" y="350" text-anchor="middle" class="tick">10</text><text x="408.2" y="350" text-anchor="middle" class="tick">11</text><text x="439.7" y="350" text-anchor="middle" class="tick">12</text><text x="471.2" y="350" text-anchor="middle" class="tick">13</text><text x="502.6" y="350" text-anchor="middle" class="tick">14</text><text x="534.1" y="350" text-anchor="middle" class="tick">15</text><text x="565.6" y="350" text-anchor="middle" class="tick">16</text><text x="597.1" y="350" text-anchor="middle" class="tick">17</text><text x="628.5" y="350" text-anchor="middle" class="tick">18</text><text x="660.0" y="350" text-anchor="middle" class="tick">19</text><text x="361.0" y="372" text-anchor="middle" class="lab">epoch</text><text x="14" y="176.0" class="lab" transform="rotate(-90 14 176.0)" text-anchor="middle">memory_gain (late − early occ)</text><line x1="62" y1="291.9" x2="660" y2="291.9" stroke="#999" stroke-dasharray="6 4" stroke-width="1.4"/><text x="656" y="286.9" text-anchor="end" class="ref" fill="#999">zero</text><polyline points="62.0,176.0 93.5,228.7 124.9,195.0 156.4,268.7 187.9,220.2 219.4,192.9 250.8,264.5 282.3,249.7 313.8,258.2 345.3,277.1 376.7,285.5 408.2,258.2 439.7,251.8 471.2,277.1 502.6,275.0 534.1,277.1 565.6,308.7 597.1,308.7 628.5,296.1 660.0,239.2" fill="none" stroke="#c0392b" stroke-width="2.6"/><circle cx="62.0" cy="176.0" r="3" fill="#c0392b"/><circle cx="93.5" cy="228.7" r="3" fill="#c0392b"/><circle cx="124.9" cy="195.0" r="3" fill="#c0392b"/><circle cx="156.4" cy="268.7" r="3" fill="#c0392b"/><circle cx="187.9" cy="220.2" r="3" fill="#c0392b"/><circle cx="219.4" cy="192.9" r="3" fill="#c0392b"/><circle cx="250.8" cy="264.5" r="3" fill="#c0392b"/><circle cx="282.3" cy="249.7" r="3" fill="#c0392b"/><circle cx="313.8" cy="258.2" r="3" fill="#c0392b"/><circle cx="345.3" cy="277.1" r="3" fill="#c0392b"/><circle cx="376.7" cy="285.5" r="3" fill="#c0392b"/><circle cx="408.2" cy="258.2" r="3" fill="#c0392b"/><circle cx="439.7" cy="251.8" r="3" fill="#c0392b"/><circle cx="471.2" cy="277.1" r="3" fill="#c0392b"/><circle cx="502.6" cy="275.0" r="3" fill="#c0392b"/><circle cx="534.1" cy="277.1" r="3" fill="#c0392b"/><circle cx="565.6" cy="308.7" r="3" fill="#c0392b"/><circle cx="597.1" cy="308.7" r="3" fill="#c0392b"/><circle cx="628.5" cy="296.1" r="3" fill="#c0392b"/><circle cx="660.0" cy="239.2" r="3" fill="#c0392b"/><polyline points="62.0,131.8 93.5,178.1 124.9,102.3 156.4,144.4 187.9,95.9 219.4,95.9 250.8,68.6 282.3,121.2 313.8,77.0 345.3,117.0 376.7,58.0 408.2,91.7" fill="none" stroke="#27ae60" stroke-width="2.6"/><circle cx="62.0" cy="131.8" r="3" fill="#27ae60"/><circle cx="93.5" cy="178.1" r="3" fill="#27ae60"/><circle cx="124.9" cy="102.3" r="3" fill="#27ae60"/><circle cx="156.4" cy="144.4" r="3" fill="#27ae60"/><circle cx="187.9" cy="95.9" r="3" fill="#27ae60"/><circle cx="219.4" cy="95.9" r="3" fill="#27ae60"/><circle cx="250.8" cy="68.6" r="3" fill="#27ae60"/><circle cx="282.3" cy="121.2" r="3" fill="#27ae60"/><circle cx="313.8" cy="77.0" r="3" fill="#27ae60"/><circle cx="345.3" cy="117.0" r="3" fill="#27ae60"/><circle cx="376.7" cy="58.0" r="3" fill="#27ae60"/><circle cx="408.2" cy="91.7" r="3" fill="#27ae60"/><polyline points="62.0,123.3 93.5,108.6 124.9,110.7 156.4,112.8 187.9,148.6 219.4,104.4 250.8,108.6 282.3,182.3 313.8,125.4 345.3,129.7 376.7,121.2 408.2,93.8" fill="none" stroke="#8e44ad" stroke-width="2.6"/><circle cx="62.0" cy="123.3" r="3" fill="#8e44ad"/><circle cx="93.5" cy="108.6" r="3" fill="#8e44ad"/><circle cx="124.9" cy="110.7" r="3" fill="#8e44ad"/><circle cx="156.4" cy="112.8" r="3" fill="#8e44ad"/><circle cx="187.9" cy="148.6" r="3" fill="#8e44ad"/><circle cx="219.4" cy="104.4" r="3" fill="#8e44ad"/><circle cx="250.8" cy="108.6" r="3" fill="#8e44ad"/><circle cx="282.3" cy="182.3" r="3" fill="#8e44ad"/><circle cx="313.8" cy="125.4" r="3" fill="#8e44ad"/><circle cx="345.3" cy="129.7" r="3" fill="#8e44ad"/><circle cx="376.7" cy="121.2" r="3" fill="#8e44ad"/><circle cx="408.2" cy="93.8" r="3" fill="#8e44ad"/><rect x="74" y="20" width="14" height="4" fill="#c0392b"/><text x="92" y="26" class="leg">notepad-tools arm · memory_gain (20 epochs)</text><rect x="460" y="20" width="14" height="4" fill="#27ae60"/><text x="478" y="26" class="leg">C · echo arm · memory_gain</text><rect x="710" y="20" width="14" height="4" fill="#8e44ad"/><text x="728" y="26" class="leg">C′ · echo arm · memory_gain</text></svg>
+<p class="cap"><b>Fig 3 — the channel-cost result.</b> The same optimizer erodes agent-maintained memory (red, 20 epochs,
+ends negative) while sustaining/improving env-maintained memory (green/purple).</p>
+
+<h2>10 · How this relates to CLBench&rsquo;s own systems</h2>
+<table>
+<tr><th>design</th><th>storage</th><th>retrieval</th><th>who curates</th><th>1.7B outcome</th></tr>
+<tr><td>CLBench <code>icl</code> (full history)</td><td>free</td><td>free</td><td>nobody</td><td>works while it fits; FIFO-truncates on small contexts; <i>not re-tested under fresh-band rigor</i></td></tr>
+<tr><td><b>our echo</b> (&ldquo;notepad := last answer&rdquo;)</td><td>automatic</td><td>automatic</td><td>model merges only</td><td><b>usable, RL-improvable (this memo)</b></td></tr>
+<tr><td>CLBench <code>icl_notepad</code> (free-text field)</td><td>model re-writes each turn</td><td>shown each turn</td><td>model composes + maintains</td><td>our faithful poker-port at 1.7B failed (&ldquo;notepad junk&rdquo;)</td></tr>
+<tr><td>notepad <i>tools</i> (ours, §9)</td><td>explicit action</td><td>explicit action</td><td>model does everything</td><td>vague: never used · explicit: used, then <b>eroded by RL</b></td></tr>
+</table>
+
+<h2>11 · Limitations</h2>
+<ul>
+<li>One model (Qwen3-1.7B), one task family, one optimizer (GRPO via Fireworks RFT). lr/temperature/group-size were
+not swept — justified now only for pushing magnitude, since signal and headroom are verified.</li>
+<li>Score effects are small against band noise (±0.02); the claim leans on the behavioural instrument (carry) and
+slope consistency, and <code>memory_gain</code> replicated in only one of the two C-runs.</li>
+<li>Arms draw independent band sets per epoch (the platform exposes no epoch id for paired draws).</li>
+<li>The full-history (bench-<code>icl</code>) variant of the early positive result predates the fresh-band rigor:
+confounded, unrefuted.</li>
+<li>RL never <i>beat</i> the instruction ceiling — the honest ordering at 1.7B is instruction ≻ RL ≻ nothing.</li>
+</ul>
+
+<h2>12 · Next step: the head-to-head CLBench plot</h2>
+<p>Goal figure, in CLBench style — official 90-instance schedule, x = instance, three curves on the same model:
+<b>no-memory</b>, <b>ICL</b> (full history, FIFO), <b>ours (trained + echo)</b> — testing the claim
+<i>&ldquo;with memory-training, the ICL baseline can be beaten.&rdquo;</i> What it requires: (1)&nbsp;deploying the trained
+LoRA (and base) on Fireworks — the only billable step; (2)&nbsp;an <code>echo_scaffold</code> system registered in
+CLBench so train/eval formats match while content + scoring stay official; (3)&nbsp;plotting both metrics
+(their avail-IoU for comparability; occ-IoU where memory separation is visible). The offline parts are buildable
+before any GPU-hour is spent.</p>
+
+<h2>Appendix · run registry &amp; glossary</h2>
+<table>
+<tr><th>id</th><th>what</th></tr>
+<tr><td class="runid">fva3tx6z / geote9qj / dtbn6lhm / c4jk2e4z / tnfxdqkv</td><td>arms A / B / C / C&prime; / probe (this memo, fresh-band rigor)</td></tr>
+<tr><td class="runid">lufz8hv1, ex1obk8g, og3fniz6</td><td>notepad-tools, vague prompt — null (exploration failure), across interfaces &amp; thinking on/off</td></tr>
+<tr><td class="runid">viihmavo, mb92hvps, iotjbxqw</td><td>notepad-tools, explicit prompt — unlocked at base; RL no improvement; 20-epoch erosion</td></tr>
+<tr><td class="runid">btalo63n, dmzj2mz8, f4lgszxz, q6lc11gu</td><td>historical scaffold-era runs — positive-looking but content-repetition-confounded (pre-salt)</td></tr>
+</table>
+<p><b>Glossary.</b> <i>occ / SCAN_OCC</i>: occupied-spectrum IoU per scan (our score). <i>memory_gain</i>: late-half −
+early-half occ within a rollout (measured, never rewarded). <i>carry-rate</i>: fraction of the echoed list preserved in
+the next report — the direct recall measurement. <i>epoch salt</i>: per-epoch random namespace making every epoch&rsquo;s
+band set unique. <i>GRPO group</i>: the 12 candidate rollouts of one dataset row whose rewards are compared to form
+advantages. <i>ICL (bench sense)</i>: full conversation history with FIFO truncation.</p>
+
+<p class="meta">Generated 2026-07-03 · sources: RESULTS_memory.md (repo), run curves from the Fireworks jobs listed above,
+prompts imported verbatim from make_spectrum_dataset.py, rollout excerpts from the downloaded epoch trace datasets.</p>
+</div></body></html>
