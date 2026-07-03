@@ -38,6 +38,7 @@ from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # 
 
 MAX_INNER_CALLS = 3
 SANITY_MAX_REPORT = 40           # generous; the canonical band has 13 channels
+print("[canon] processor v3 (robust calls: retry+backoff, empty-choices guarded, force-advance on dead turns)", flush=True)
 THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 TOOLS: List[Dict[str, Any]] = [{"type": "function", "function": {
@@ -98,8 +99,23 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
                         if d.get("role") == "assistant" and d.get("content"):
                             d["content"] = THINK.sub("", d["content"]).strip()
                         payload.append(d)
-                    resp = await policy._make_llm_call(messages=payload, tools=TOOLS)
-                    am = resp["choices"][0]["message"]
+                    # Robust call: litellm already retries 8x internally; on top of that, tolerate transient
+                    # deployment unhealthiness (cold start / "no healthy upstream") with backoff, and treat a
+                    # still-failed call as a skipped turn instead of killing the rollout (ejuyuo2l died from
+                    # resp["choices"][0] IndexError on failed calls -> 36% row errors -> job abort).
+                    am = None
+                    for attempt in range(3):
+                        try:
+                            resp = await policy._make_llm_call(messages=payload, tools=TOOLS)
+                            choices = (resp or {}).get("choices") or []
+                            if choices:
+                                am = choices[0]["message"]
+                                break
+                        except Exception:
+                            pass
+                        await asyncio.sleep(20 * (attempt + 1))
+                    if am is None:
+                        break  # -> force-advance below with an empty report
                     tcs = [tc if isinstance(tc, dict) else tc.model_dump() for tc in (am.get("tool_calls") or [])]
                     msgs.append(Message(role="assistant", content=am.get("content") or "", tool_calls=tcs or None))
                     if not tcs:
