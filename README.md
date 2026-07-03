@@ -9,10 +9,13 @@ multi-step task to do better later — rather than baking task skill into the we
 **`memory_gain` = late-half − early-half performance**, and require it to rise *under training* while the
 scenario is **randomized per rollout** (so there is nothing to memorize in the weights).
 
-> **Status: research prototype.** The core result — RL trains memory *use* on the 1.7B **when the
-> environment helps maintain the memory** — is proven and causally validated. The stricter version — the
-> model driving its **own** notepad via tools — does **not** work at 1.7B. Both findings are documented
-> honestly below.
+> **Status: COMPLETE — see [`RESULTS_memory.md`](RESULTS_memory.md) for the final, controlled result
+> (2026-07-03).** Headline: **GRPO reproducibly improves the 1.7B's memory *recall*** (carry-rate
+> 0.89 → 0.94 in two independent runs) on **never-repeating content** (knowledge-baking impossible by
+> construction) with a **scrambled-memory control flat** (skill drift excluded) — while one paragraph of
+> explicit instruction still installs a *stronger* policy than 12 epochs of RL reach, and agent-managed
+> notepad memory *erodes* under prolonged RL. Sections below describe the task and infra; historical
+> results (pre fresh-band rigor) are marked as such.
 
 ---
 
@@ -33,31 +36,28 @@ rising late-vs-early *is* memory.
 
 ---
 
-## Results — the honest hierarchy
+## Final results — **[`RESULTS_memory.md`](RESULTS_memory.md)** (the definitive account)
 
-How much the memory channel is *helped by the environment* determines whether the 1.7B can use it:
+The controlled experiment (fresh bands every epoch via **epoch-salting**, so no band is ever seen twice;
+**scrambled-memory control arm**; behavioral **carry-rate** instrumentation):
 
-| Memory channel | Who maintains it | 1.7B result | Evidence |
+| arm | prompt | memory echo | outcome |
 |---|---|---|---|
-| **Full in-context history** | free (model re-reads) | **works, large** — `memory_gain` 0.075 → ~0.13 | `btalo63n`, behaviorally confirmed |
-| **Running-list scaffold** (env echoes the model's own prior report; history windowed out) | env (semi-automatic) | **works, small but causally real** — +0.015 early→late, +0.034 coverage vs a scrambled control | `liabhmdn` / `dmzj2mz8` + control `q6lc11gu` |
-| **Agent-controlled notepad tools** (`notepad_read` / `notepad_write`) | the model (fully manual) | **null** — sits at the memoryless floor (`mean_occ` ~0.16, `memory_gain` ~0) | `lufz8hv1` |
+| A `fva3tx6z` | explicit | real | occ **0.472 flat** — behavior *saturated* by instruction (carry 0.967, above the naive-oracle 0.447) |
+| B `geote9qj` | explicit | **scrambled** | **flat** (occ 0.356, 12 epochs) — zero non-memory skill drift |
+| C `dtbn6lhm` | weak | real | **rises**: occ 0.403→0.439 (R²=0.65), **carry 0.888→0.938** |
+| C′ `c4jk2e4z` | weak | real | **replicates the mechanism**: occ slope same sign, **carry 0.900→0.935** |
 
-**Bottom line:** RL provably trains within-rollout memory use on the 1.7B *when the environment helps
-maintain the memory* (scaffold), and the **scramble control** confirms it's real recalled content, not an
-artifact. But when the model must drive its **own** notepad via tools, the 1.7B can't — it reports at
-memoryless level regardless of training. This matches the earlier poker finding ("a 1.7B never learned
-useful notepad memory"): it is a **model-size ceiling, not a task/infra bug.** A larger base (4B+) is the
-likely unlock (capacity-blocked on this account when tried).
+**Findings:** (1) RL trains memory *recall* — replicated behaviorally, knowledge excluded by construction,
+skill controlled at zero; (2) the reward correctly ranks memory use within GRPO groups (corr ≈ +0.8), so
+reward shape was never the bottleneck; (3) **instruction ≫ RL** at this scale — the explicit prompt installs
+a stronger policy (0.472) than RL reaches from a weak base in 12 epochs (0.42–0.44); (4) RL **preserves**
+env-maintained memory but **erodes** agent-managed (notepad-tool) memory over long training — the
+channel-cost dependence result.
 
-### Behavioral confirmation (scaffold; base vs trained — isolates the weights)
-| | reports/scan early→late | recall% early→late | hallucination | occ gain |
-|---|---|---|---|---|
-| base    | 5.5 → 9.5  | 43% → 61% | 0% | +0.086 |
-| trained | 7.1 → 13.3 | 56% → 69% | 0% | +0.141 |
-
-Late > early in both report size and recalled-from-memory %, and training amplified both — genuine
-in-context memory, improved by RL, with zero hallucination. Full run-by-run log in **`RUNS_spectrum.md`**.
+*Historical note:* earlier positive readings (`btalo63n`, `dmzj2mz8`, behavioral tables in
+`RUNS_spectrum.md`) predate the fresh-band rigor — they reused the same 48 bands across all epochs and are
+confounded by content repetition; keep them as history, cite `RESULTS_memory.md` as the result.
 
 ---
 

@@ -25,8 +25,10 @@ Design (mirrors the poker fixes that were hard-won):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import random
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from eval_protocol.mcp.adapter import EnvironmentAdapter
@@ -63,6 +65,24 @@ CH_BW = 8.0                     # transmitter bandwidth (MHz) — also the FIXED
 MAX_REPORT = 16                 # cap on regions per report: blocks blanketing the band (carpet exploit)
 NOTEPAD_MAX_CHARS = 2000        # cap on the agent's notepad (its persistent cross-scan memory)
 
+# --- Experiment flags (the evaluator entry file sets these os.environ BEFORE importing this module) ---
+SCAFFOLD = os.environ.get("SPECTRUM_SCAFFOLD") == "1"   # env-echoed running list (the RL-improvable memory channel)
+SCRAMBLE = os.environ.get("SPECTRUM_SCRAMBLE") == "1"   # destroy the echoed list's CONTENT (memory-content control arm)
+
+# EPOCH-SALT: fresh bands every epoch. Each RFT epoch evaluates in its own process (per-epoch streamlogs),
+# so an import-time salt is CONSTANT within an epoch — all GRPO candidates of a row still share one band —
+# but DIFFERENT across epochs: no band ever repeats, so weight-memorizing layouts ("content baking") is
+# structurally impossible and every epoch's metrics are automatically a FRESH-BAND eval of the current
+# policy. (All earlier datasets reused row_ids spectrum_{i}, i.e. the SAME 48 bands across all runs/epochs.)
+# The probe job verifies the one-salt-per-epoch assumption via the [spectrum] SALT= streamlog line.
+EPOCH_SALT = secrets.token_hex(4) if os.environ.get("SPECTRUM_EPOCH_SALT") == "1" else ""
+
+
+def band_seed(row_id: Any) -> int:
+    """Per-ROW deterministic band seed (GRPO candidates of a row share one band); EPOCH_SALT, when enabled,
+    rotates the whole band set every epoch-process."""
+    return int(hashlib.md5(f"{EPOCH_SALT}:{row_id}".encode()).hexdigest()[:12], 16)
+
 # AGENT-CONTROLLED NOTEPAD design (replaces the env-echoed "running list" scaffold — which was the ENV doing
 # the remembering). The agent has notepad_read / notepad_write tools (see spectrum_mcp), and ICL-OFF
 # windowing hides all earlier scans, so the notepad is the agent's ONLY cross-scan memory. SCAN_MARKER is
@@ -77,8 +97,9 @@ def _mark(prompt: str) -> str:
     """Prepend the scan-boundary marker so windowing keeps only the current scan + this turn's notepad reads."""
     if not ICL_OFF:
         return prompt
-    return (f"{SCAN_MARKER} NEW SCAN — you cannot see earlier scans. Your only memory of them is your "
-            f"notepad (call notepad_read).\n{prompt}")
+    mem = "the RUNNING LIST shown with this scan" if SCAFFOLD else "your notepad (call notepad_read)"
+    return (f"{SCAN_MARKER} NEW SCAN — you cannot see earlier scans. Your only memory of them is "
+            f"{mem}.\n{prompt}")
 
 
 def _random_layout(ent: random.Random, band_width: float) -> List[Dict[str, Any]]:
@@ -118,6 +139,7 @@ class SpectrumEnv:
         self.layout_n = 0
         self.notepad: str = ""                         # the agent's persistent memory (notepad_read/write)
         self.pending_scan: str = ""                    # next scan, delivered on demand via the get_scan tool
+        self.last_report: List[float] = []             # center freqs of the previous report (scaffold echo)
 
     def reset(self, seed: Optional[int] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # PER-ROW BAND for GRPO comparability: seed the band DETERMINISTICALLY from the framework-provided
@@ -141,8 +163,26 @@ class SpectrumEnv:
         self.occ_ious = []
         self.notepad = ""
         self.pending_scan = ""
-        # Scan 1 is the initial observation (marked, clean — no scaffold). Scans 2..N arrive via get_scan.
+        self.last_report = []
+        # Scan 1 is the initial observation (marked; no echo yet — nothing has been reported).
         return self._obs(_mark(self.current_query.prompt), instance_complete=False), {}
+
+    def _echo(self) -> str:
+        """The running-list scaffold (SCAFFOLD=1): echo the model's OWN previous report into the next scan,
+        turning cross-scan accumulation into a one-step merge — the env maintains the memory channel, the
+        model must USE it. SCRAMBLE=1 (control arm) replaces the content with random in-band frequencies of
+        the SAME count: structure/growth/instruction identical, memory CONTENT destroyed — any training gain
+        that survives scrambling is non-memory skill, any gain that disappears was real memory use."""
+        if not (SCAFFOLD and self.last_report):
+            return ""
+        freqs = self.last_report
+        if SCRAMBLE:
+            rng = random.Random(os.urandom(8))
+            freqs = sorted(round(rng.uniform(CH_BW, self.band_width - CH_BW), 1) for _ in freqs)
+        lst = ", ".join(f"{f:.1f}" for f in freqs)
+        return ("\n=== YOUR RUNNING LIST (your previous report) ===\n"
+                f"{lst}\n"
+                "Keep ALL of these, add any NEW peaks from this scan, and submit the FULL updated list.\n")
 
     def _occ_iou(self, action_obj: Any) -> float:
         """IoU of the OCCUPIED spectrum: |reported_occupied ∩ true_occupied| / |union|, over the band.
@@ -181,6 +221,13 @@ class SpectrumEnv:
         self.scan_ious.append(avail)
         self.occ_ious.append(occ)
         self.done = bool(sr.done)
+        try:  # remember what was just reported — the scaffold echoes it into the next scan
+            self.last_report = [
+                float(getattr(t, "center_freq", 0.0))
+                for t in (getattr(action_obj, "transmitters", None) or [])
+            ][:MAX_REPORT]
+        except Exception:
+            self.last_report = []
 
         # submit_report returns the NEXT scan directly (clean + marked, NO running-list scaffold) — the
         # agent's sole cross-scan memory is its own notepad (notepad_read/notepad_write). SCAN_OCC is
@@ -195,7 +242,8 @@ class SpectrumEnv:
             nxt = getattr(sr.observation, "content", "") or ""
         # Clean next scan (marked, no SCAN_OCC) — read by the custom SpectrumTurnRolloutProcessor via
         # env.pending_scan. McpGym's obs below appends SCAN_OCC to it (windowed to the current scan).
-        self.pending_scan = "" if self.done else _mark(nxt)
+        # Under SCAFFOLD the running-list echo (real or scrambled) rides along inside the scan delivery.
+        self.pending_scan = "" if self.done else (_mark(nxt) + self._echo())
         prompt = f"{self.pending_scan}\nSCAN_OCC: {occ:.4f} SCAN_AVAIL: {avail:.4f}"
 
         info = {"instance_complete": self.done, "scan_occ": occ, "scan_avail": avail, "scans_done": len(self.occ_ious)}

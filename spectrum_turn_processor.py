@@ -27,18 +27,27 @@ litellm.drop_params = True   # Fireworks rejects unsupported params (e.g. tool_c
                              # drop them instead of failing every call (io2d7zlp: 5544 failed calls on tool_choice).
 
 from eval_protocol.mcp.execution.policy import LiteLLMPolicy
-from eval_protocol.models import EvaluationRow, Message
+from eval_protocol.models import EvaluationRow, Message, Status
+from eval_protocol.types.types import TerminationReason
 from eval_protocol.pytest.rollout_processor import RolloutProcessor
 from eval_protocol.pytest.types import RolloutProcessorConfig
 from eval_protocol.pytest.utils import normalize_fireworks_model_for_litellm
 
 from spectrum_adapter import (
     SpectrumEnv, DEFAULT_TASK_NAME, DEFAULT_TASK_KWARGS, CH_BW, MAX_REPORT, NOTEPAD_MAX_CHARS,
+    SCAFFOLD, SCRAMBLE, EPOCH_SALT, band_seed,
 )
 from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # type: ignore
 
 NUM_SCANS = int(DEFAULT_TASK_KWARGS["num_instances"])  # 12
 MAX_INNER_CALLS = 6   # model calls allowed within one scan before we force-advance (notepad_read/write/submit)
+
+# Streamlog markers for the epoch-salt probe: one distinct SALT per epoch-process => salting is group-stable
+# and epoch-varying (safe). Also list epoch-identifying env-var NAMES (names only, never values — no secrets):
+# if the harness exposes the epoch number we can switch to a DETERMINISTIC per-epoch salt (paired arms).
+print(f"[spectrum] SALT={EPOCH_SALT or 'off'} SCAFFOLD={SCAFFOLD} SCRAMBLE={SCRAMBLE}", flush=True)
+_epochish = sorted(k for k in __import__("os").environ if any(s in k.upper() for s in ("EPOCH", "STEP", "ROUND", "ITER")))
+print(f"[spectrum] epoch-ish env var NAMES: {_epochish}", flush=True)
 
 TOOLS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
@@ -58,12 +67,14 @@ TOOLS: List[Dict[str, Any]] = [
             "center_freqs": {"type": "array", "items": {"type": "number"}}}, "required": ["center_freqs"]},
     }},
 ]
+if SCAFFOLD:
+    # Scaffold arms: the env maintains the memory (running-list echo); notepad tools would confound the
+    # memory-channel attribution, so expose submit_report only (matches the original scaffold-run shape).
+    TOOLS = [t for t in TOOLS if t["function"]["name"] == "submit_report"]
 
 
-def _band_seed(row_id: Optional[str]) -> int:
-    """Per-ROW deterministic band seed (md5 of row_id): all GRPO candidates of a row share one band+schedule
-    (reward diffs = policy, not band luck) while different rows get different bands. Mirrors spectrum_mcp."""
-    return int(hashlib.md5(str(row_id or "0").encode()).hexdigest()[:12], 16)
+# Band seeding is centralized in spectrum_adapter.band_seed (per-row deterministic + optional epoch salt).
+_band_seed = band_seed
 
 
 def _exec_tool(name: str, args: Dict[str, Any], notepad: Dict[str, str], env: SpectrumEnv):
@@ -113,11 +124,22 @@ class SpectrumTurnRolloutProcessor(RolloutProcessor):
             obs, _ = env.reset(seed=_band_seed(row.input_metadata.row_id))
             notepad = {"text": ""}
             msgs: List[Message] = list(row.messages)               # starts with [system]
+            row.messages = msgs                                     # same object -> config.logger.log(row) sees live state
             sys_msgs = [m for m in msgs if m.role == "system"]
             scan_text = obs["prompt"]
 
+            def emit(m: Message):
+                """Append a message AND incrementally log the row, so the dashboard trace shows each turn
+                distinctly: system / user(scan) / assistant(tool_calls) / tool(result). Mirrors how the
+                built-in AgentRolloutProcessor logs via append_message_and_log."""
+                msgs.append(m)
+                try:
+                    config.logger.log(row)
+                except Exception:
+                    pass
+
             for _scan in range(NUM_SCANS):
-                msgs.append(Message(role="user", content=scan_text))   # push the scan as a USER turn
+                emit(Message(role="user", content=scan_text))          # push the scan as a USER turn
                 scan_start = len(msgs) - 1                              # window boundary for this scan
                 submitted = False
                 for _inner in range(MAX_INNER_CALLS):
@@ -125,8 +147,10 @@ class SpectrumTurnRolloutProcessor(RolloutProcessor):
                     payload = [m.model_dump() for m in windowed]
                     resp = await policy._make_llm_call(messages=payload, tools=TOOLS)
                     am = resp["choices"][0]["message"]
-                    tcs = am.get("tool_calls") or []
-                    msgs.append(Message(role="assistant", content=am.get("content"), tool_calls=tcs or None))
+                    # Normalize tool_calls to plain dicts: litellm may return pydantic objects, which (a) fail
+                    # Message validation locally and (b) serialize non-canonically for the dashboard viewer.
+                    tcs = [tc if isinstance(tc, dict) else tc.model_dump() for tc in (am.get("tool_calls") or [])]
+                    emit(Message(role="assistant", content=am.get("content") or "", tool_calls=tcs or None))
                     if not tcs:
                         break                                          # no tool (rare w/ required) -> end scan
                     for tc in tcs:
@@ -136,7 +160,7 @@ class SpectrumTurnRolloutProcessor(RolloutProcessor):
                         except Exception:
                             args = {}
                         result, occ = _exec_tool(fn.get("name", ""), args, notepad, env)
-                        msgs.append(Message(role="tool", content=result, tool_call_id=tc.get("id")))
+                        emit(Message(role="tool", content=result, tool_call_id=tc.get("id")))
                         if occ is not None:
                             submitted = True
                     if submitted:
@@ -150,10 +174,18 @@ class SpectrumTurnRolloutProcessor(RolloutProcessor):
 
             row.messages = msgs
             row.execution_metadata.rollout_duration_seconds = time.perf_counter() - t0
+            # THE dashboard-trace fix: rollout_status defaults to rollout_running and the trace viewer only
+            # renders finished rollouts. McpGym sets this in manager.py:147; a custom processor must do it
+            # itself — without it every row stays "running" forever and the UI shows no traces.
+            row.rollout_status = Status.rollout_finished(termination_reason=TerminationReason.CONTROL_PLANE_SIGNAL)
             return row
 
         async def _wrap(r: EvaluationRow) -> EvaluationRow:
             async with sem:
-                return await process_row(r)
+                try:
+                    return await process_row(r)
+                except Exception as e:
+                    r.rollout_status = Status.rollout_error(str(e)[:300])
+                    raise
 
         return [asyncio.create_task(_wrap(r)) for r in rows]

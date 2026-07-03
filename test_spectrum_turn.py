@@ -24,7 +24,7 @@ MODEL = "accounts/fireworks/models/qwen3-8b"
     completion_params=[{
         "model": MODEL,
         "temperature": 1.2,
-        "max_tokens": 1024,          # thinking OFF (dataset has /no_think)
+        "max_tokens": 4096,          # thinking ON (brief): room for the reasoning chain so it can't truncate the tool call
         "tool_choice": "required",
     }],
     rollout_processor=SpectrumTurnRolloutProcessor(),   # custom user/assistant loop, no MCP server
