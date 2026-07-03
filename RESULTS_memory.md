@@ -99,8 +99,10 @@ On a small model, with content memorization made impossible and skill drift cont
   swept (a sweep is justified now only for pushing magnitude, since signal and headroom are verified).
 - Arm A/B/C band sets are drawn independently per epoch (the harness exposes no epoch id for paired salts);
   the ±0.02 probe noise floor bounds the resulting comparison noise.
-- occ ceilings are noise-limited (~0.45–0.50 with curation), not 1.0; all effect sizes must be read against
-  that compressed range.
+- occ ceilings are noise-limited, not 1.0: naive accumulate-all 0.447; + perfect false-alarm filtering
+  0.513; + center denoising 0.549 (both cheat-filtered upper bounds — a real agent's ceiling is ~0.50–0.55).
+  All effect sizes must be read against that compressed range; the instructed model (0.472) has already
+  banked most recall value plus partial curation.
 - The full-history ("ICL-on") variant of the old positive result was never re-tested under fresh-band rigor:
   confounded, unrefuted.
 - `memory_gain` replicated in only one of two C-runs; the claim rests on carry-rate + occ slope, not on gain.
