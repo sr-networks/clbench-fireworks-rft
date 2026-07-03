@@ -80,13 +80,15 @@ averages away frequency jitter.</li>
 <tr><td><b>floor</b> — no memory</td><td>occ ≈ 0.16</td><td>occ ≈ 0.18 &nbsp;(avail ≈ 0.20)</td></tr>
 <tr><td><b>ICL</b> — full history</td><td>not used during training (windowed off);<br>historical ICL-on runs ≈ 0.31 base (confounded era)</td><td><i>measured live in the head-to-head</i> — one of the plot&rsquo;s curves</td></tr>
 <tr><td>trained memory (ours)</td><td>0.40 → 0.44 (weak prompt + RL) · 0.47 (instructed)</td><td><i>measured live in the head-to-head</i></td></tr>
-<tr><td><b>ceiling</b> — perfect agent</td><td>0.447 accumulate-all · 0.513 +FA-filter · 0.549 +denoise · 1.0 scorer max</td><td>0.461 accumulate-all &nbsp;(avail ≈ 0.21)</td></tr>
+<tr><td><b>ceiling</b> — perfect agent</td><td>0.447 accumulate-all · 0.513 +FA-filter · 0.549 +denoise · 1.0 scorer max</td><td>occ 0.657 (8-MHz widths) → <b>0.731</b> (+observed widths)<br>avail 0.216 (8-MHz widths) → <b>0.349</b> (+observed widths)</td></tr>
 </table>
 <p class="cap">How to read any plot in this memo: every curve lives between the floor and the ceiling; a memory
 system is <i>real</i> if it clears the floor, and <i>worth having</i> if it clears ICL — because ICL is what you
-get by just re-reading the transcript. Note also (bottom-right cell): on the bench&rsquo;s own canonical band its
-native metric barely separates floor (0.20) from perfect memory (0.21) — which is why every figure here shows
-both metrics.</p>
+get by just re-reading the transcript. Note the bench-schedule ceiling decomposition (bottom-right): on the
+bench&rsquo;s native available-IoU, <b>perfect memory alone moves the floor only 0.204&nbsp;→&nbsp;0.216</b> — one point —
+because that metric mostly rewards knowing the channel <i>widths</i> (0.216&nbsp;→&nbsp;0.349) and is squeezed by a tiny
+33-MHz available target; on occupied-IoU the same memory is worth 0.184&nbsp;→&nbsp;0.657. That is why every figure
+here shows both metrics.</p>
 
 <h2>2 · Our adaptation for RL training</h2>
 <p>We turn one <i>session</i> into one RL <b>rollout</b>: 12 scans of one hidden band. The model answers each scan
