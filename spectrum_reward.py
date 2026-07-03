@@ -65,6 +65,36 @@ def _metrics(gain: float, n: int, early: float, late: float, mean_occ: float, me
     }
 
 
+def compute_spectrum_avail_reward(row: EvaluationRow) -> EvaluateResult:
+    """BENCH-PURE reward: the task's NATIVE available-spectrum IoU (SCAN_AVAIL) — exactly the CLBench metric.
+    occupied-IoU is tracked as a diagnostic only. Gains (late-early) measured on both, never rewarded."""
+    avail = _collect(row, _AVAIL)
+    occ = _collect(row, _OCC)
+    n = len(avail)
+    if n < 1:
+        return EvaluateResult(
+            score=INCOMPLETE_PENALTY, is_score_valid=True,
+            reason="scans_completed=0 (first-turn format failure)",
+            metrics=_metrics(0.0, 0, 0.0, 0.0, 0.0, 0.0),
+        )
+    mean_avail = _mean(avail)
+    mean_occ = _mean(occ)
+    half = max(1, n // 2)
+    a_early, a_late = _mean(avail[:half]), _mean(avail[half:])
+    o_early, o_late = (_mean(occ[:half]), _mean(occ[half:])) if occ else (0.0, 0.0)
+    score = OCC_SCALE * mean_avail          # scaling is GRPO-internal; the METRIC is mean_avail itself
+    m = _metrics(o_late - o_early, n, a_early, a_late, mean_occ, mean_avail)
+    m["avail_gain"] = MetricResult(score=a_late - a_early, is_score_valid=True,
+                                   reason=f"late-early avail={a_late - a_early:+.3f}")
+    return EvaluateResult(
+        score=score, is_score_valid=True,
+        reason=(f"scans={n}; mean_avail={mean_avail:.3f}; early_avail={a_early:.3f}; late_avail={a_late:.3f}; "
+                f"avail_gain={a_late - a_early:+.3f}; mean_occ={mean_occ:.3f}; occ_gain={o_late - o_early:+.3f}; "
+                f"score={score:.3f}"),
+        metrics=m,
+    )
+
+
 def compute_spectrum_reward(row: EvaluationRow) -> EvaluateResult:
     occ = _collect(row, _OCC)
     avail = _collect(row, _AVAIL)

@@ -36,7 +36,27 @@ from src.registry import get_task_class  # type: ignore
 from src.interface import Response  # type: ignore
 from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # type: ignore
 
-SRC_TASK = os.path.join(os.path.dirname(sys.modules["src.registry"].__file__), "tasks", "blind_spectrum_monitoring")
+# Schedule/variant JSONs: the pip-installed src package ships WITHOUT these data files (same issue as the
+# Jinja templates), and the evaluator upload excludes gitignored vendored copies — so resolve in order:
+# local vendored dir -> site-packages -> fetch from the bench's public GitHub into the vendored dir.
+_VENDORED = os.path.join(HERE, "canon_fixtures")
+_BENCH_RAW = "https://raw.githubusercontent.com/sr-networks/continual-learning-bench/main/src/tasks/blind_spectrum_monitoring"
+_FIXTURES = ["schedules/default.json"] + [f"variants/{v}.json" for v in
+             ("five_ch_wide", "five_plus_four_mixed", "full_grid_active")]
+
+def _fixtures_dir() -> str:
+    if os.path.isfile(os.path.join(_VENDORED, "schedules", "default.json")):
+        return _VENDORED
+    sp = os.path.join(os.path.dirname(sys.modules["src.registry"].__file__), "tasks", "blind_spectrum_monitoring")
+    if os.path.isfile(os.path.join(sp, "schedules", "default.json")):
+        return sp
+    for rel in _FIXTURES:  # cloud: fetch once from the bench's public repo
+        dst = os.path.join(_VENDORED, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        urllib.request.urlretrieve(f"{_BENCH_RAW}/{rel}", dst)
+    return _VENDORED
+
+SRC_TASK = _fixtures_dir()
 BAND = 168.0
 ICL_CHAR_BUDGET = 60_000          # ~ qwen3-1.7b context after headroom; FIFO-truncate beyond this (bench-style)
 MAX_REPORT = 24                   # bench band has 13 channels; give some slack, still no carpeting

@@ -15,3 +15,7 @@ benchmark_fixtures/
 
 # OS
 .DS_Store
+
+# vendored CLBench canonical schedule/variant data (canary-marked; needed in the evaluator bundle,
+# NOT republished — pip-installed src ships without these data files, same issue as the templates)
+canon_fixtures/
