@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 STYLE = {  # (label, color, linestyle, width)
     ("nomem", "base"): ("no memory (base)", "#8a8a8a", ":", 2.0),
     ("icl", "base"): ("ICL — full history (base)", "#1f6fb2", "-", 2.0),
+    ("icl", "trained"): ("ICL (RL-TRAINED, nudge)", "#0b3f6e", "-", 2.8),
+    ("notepad", "base"): ("notepad (base)", "#d98a26", "--", 2.0),
+    ("notepad", "trained"): ("notepad (RL-TRAINED, nudge)", "#a35a00", "-", 2.8),
     ("echo", "base"): ("running-list memory (base)", "#7fbf7f", "--", 2.0),
     ("echo", "trained"): ("running-list memory (MEMORY-TRAINED)", "#1a7a2e", "-", 2.8),
 }

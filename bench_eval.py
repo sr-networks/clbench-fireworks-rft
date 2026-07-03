@@ -84,12 +84,22 @@ SYSTEM_ECHO = (
     "Think BRIEFLY, then act — keep your reasoning to a sentence or two, do not over-explain."
 )
 
-TOOLS = [{"type": "function", "function": {
-    "name": "submit_report",
-    "description": "Submit your report for the CURRENT scan: center_freqs = center frequencies (MHz) of the occupied regions.",
-    "parameters": {"type": "object", "properties": {
-        "center_freqs": {"type": "array", "items": {"type": "number"}}}, "required": ["center_freqs"]},
-}}]
+def tools_for(system: str):
+    props = {
+        "center_freqs": {"type": "array", "items": {"type": "number"}},
+        "bandwidths": {"type": "array", "items": {"type": "number"}},
+    }
+    if system == "notepad":
+        props["notepad_update"] = {"type": "string",
+                                   "description": "Optional: replace your notepad (persists to the next scan)."}
+    return [{"type": "function", "function": {
+        "name": "submit_report",
+        "description": ("Submit your occupancy report for the CURRENT scan. center_freqs: center frequency (MHz) "
+                        "of every occupied region; bandwidths: width (MHz) of each region, same order."),
+        "parameters": {"type": "object", "properties": props, "required": ["center_freqs", "bandwidths"]},
+    }}]
+
+TOOLS = tools_for("nomem")  # default (back-compat for call_model)
 
 
 # ---------------- official schedule ----------------
@@ -136,8 +146,8 @@ def occ_iou(report: list[float], widths: list[float], gt: list[dict]) -> float:
 
 # ---------------- model calls ----------------
 
-def call_model(model: str, messages: list[dict], temperature: float, api_key: str, max_tokens: int = 4096):
-    body = json.dumps({"model": model, "messages": messages, "tools": TOOLS,
+def call_model(model: str, messages: list[dict], temperature: float, api_key: str, max_tokens: int = 4096, tools=None):
+    body = json.dumps({"model": model, "messages": messages, "tools": tools or TOOLS,
                        "temperature": temperature, "max_tokens": max_tokens}).encode()
     req = urllib.request.Request("https://api.fireworks.ai/inference/v1/chat/completions", data=body,
                                  headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
@@ -154,22 +164,36 @@ def call_model(model: str, messages: list[dict], temperature: float, api_key: st
 PEAK = re.compile(r"freq:\s*([0-9.]+)\s*MHz")
 NUMS = re.compile(r"-?\d+\.?\d*")
 
-def parse_report(msg) -> list[float]:
+def parse_report(msg):
+    """Returns (center_freqs, bandwidths, notepad_update_or_None). Native widths; ragged answers padded 8.0."""
     for tc in (msg.get("tool_calls") or []):
-        fn = tc.get("function", {})
+        fn = tc.get("function") or {}
         if fn.get("name") == "submit_report":
             try:
-                return [float(x) for x in json.loads(fn.get("arguments") or "{}").get("center_freqs") or []][:MAX_REPORT]
+                args = json.loads(fn.get("arguments") or "{}")
+                if not isinstance(args, dict):
+                    args = {}
+                cfs, bws = [], []
+                for x in (args.get("center_freqs") or [])[:MAX_REPORT]:
+                    try: cfs.append(float(x))
+                    except Exception: pass
+                for x in (args.get("bandwidths") or [])[:MAX_REPORT]:
+                    try: bws.append(float(x))
+                    except Exception: pass
+                bws = bws[:len(cfs)] + [8.0] * max(0, len(cfs) - len(bws))
+                nu = args.get("notepad_update")
+                return cfs, bws, (nu if isinstance(nu, str) and nu.strip() else None)
             except Exception:
                 pass
     content = msg.get("content") or ""          # fallback: last bracketed list in text
     m = re.findall(r"\[([0-9,.\s]+)\]", content)
     if m:
         try:
-            return [float(x) for x in NUMS.findall(m[-1])][:MAX_REPORT]
+            cfs = [float(x) for x in NUMS.findall(m[-1])][:MAX_REPORT]
+            return cfs, [8.0] * len(cfs), None
         except Exception:
             pass
-    return []
+    return [], [], None
 
 
 def mock_reply(kind: str, messages: list[dict], state: dict):
@@ -185,18 +209,29 @@ def mock_reply(kind: str, messages: list[dict], state: dict):
     else:
         rep = det
     return {"content": "", "tool_calls": [{"function": {"name": "submit_report",
-            "arguments": json.dumps({"center_freqs": rep})}}]}
+            "arguments": json.dumps({"center_freqs": rep, "bandwidths": [8.0] * len(rep)})}}]}
 
 
-# ---------------- the three memory systems ----------------
+# ---------------- the memory systems ----------------
 
-def run_one(system: str, model: str, run_idx: int, temperature: float, api_key: str, mock: str | None):
+def run_one(system: str, model: str, run_idx: int, temperature: float, api_key: str, mock: str | None,
+            sysprompt: str | None = None):
     stages = load_default_schedule()
     rows, inst_idx = [], 0
     hist: list[dict] = []                      # icl running history
     prev_report: list[float] = []              # echo memory
+    notepad = ""                               # notepad system memory (bench icl_notepad semantics)
     mock_state: dict = {}                      # mock accumulate memory (per full session)
-    sys_prompt = {"nomem": SYSTEM_NOMEM, "icl": SYSTEM_ICL, "echo": SYSTEM_ECHO}[system]
+    if sysprompt:                              # training-matched prompt (make_canon_dataset.PROMPTS key)
+        from make_canon_dataset import PROMPTS
+        sys_prompt = PROMPTS[sysprompt]
+    else:
+        sys_prompt = {"nomem": SYSTEM_NOMEM, "icl": SYSTEM_ICL, "echo": SYSTEM_ECHO,
+                      "notepad": None}[system]
+        if system == "notepad":
+            from make_canon_dataset import PROMPTS
+            sys_prompt = PROMPTS["np-neutral"]
+    tools = tools_for(system)
 
     for si, st in enumerate(stages):
         task = get_task_class("blind_spectrum_monitoring")(**st["kwargs"])
@@ -210,6 +245,10 @@ def run_one(system: str, model: str, run_idx: int, temperature: float, api_key: 
                 prompt += ("\n=== YOUR RUNNING LIST (your previous report) ===\n"
                            + ", ".join(f"{f:.1f}" for f in prev_report)
                            + "\nKeep ALL of these, add any NEW peaks from this scan, and submit the FULL updated list.\n")
+            if system == "notepad":
+                prompt += ("\n=== YOUR NOTEPAD ===\n" + (notepad if notepad else "(empty)")
+                           + "\n(You cannot see earlier scans; the notepad above is the only thing that persists. "
+                             "Update it via the notepad_update field of submit_report.)\n")
             if system == "icl":
                 hist.append({"role": "user", "content": prompt})
                 msgs = [{"role": "system", "content": sys_prompt}]
@@ -223,13 +262,14 @@ def run_one(system: str, model: str, run_idx: int, temperature: float, api_key: 
             else:
                 msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}]
 
-            reply = mock_reply(mock, msgs, mock_state) if mock else call_model(model, msgs, temperature, api_key)
-            report = parse_report(reply)
+            reply = mock_reply(mock, msgs, mock_state) if mock else call_model(model, msgs, temperature, api_key, tools=tools)
+            report, widths, nu = parse_report(reply)
             if system == "icl":
                 hist.append({"role": "assistant", "content": f"submit_report({report})"})
+            if system == "notepad" and nu:
+                notepad = nu[:4000]
             prev_report = report or prev_report
 
-            widths = [8.0] * len(report)       # reported regions: fixed nominal width (as in training)
             txs = [Transmitter(center_freq=c, bandwidth=w, currently_active=True, estimated_power=-30.0)
                    for c, w in zip(report, widths)]
             sr = task.step(Response(action=ScanReport(transmitters=txs), metadata={}))
@@ -258,13 +298,15 @@ def main():
     ap.add_argument("--mock", choices=["current", "accumulate"], default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--sysprompt", default=None,
+                    help="training-matched prompt key from make_canon_dataset.PROMPTS (nudge/neutral2/np-nudge/...)")
     args = ap.parse_args()
     api_key = os.environ.get("FIREWORKS_API_KEY", "")
     all_rows = []
     for system in args.systems.split(","):
         for run in range(args.runs):
             t0 = time.time()
-            rows = run_one(system.strip(), args.model, run, args.temperature, api_key, args.mock)
+            rows = run_one(system.strip(), args.model, run, args.temperature, api_key, args.mock, args.sysprompt)
             occ = sum(r["occ"] for r in rows) / len(rows)
             av = sum(r["avail"] for r in rows) / len(rows)
             print(f"[{system} run{run}] {len(rows)} instances  mean_occ={occ:.3f}  mean_avail={av:.3f}  ({time.time()-t0:.0f}s)", flush=True)
