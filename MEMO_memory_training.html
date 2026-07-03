@@ -55,6 +55,39 @@ detector peaks (miss rate 0.15, false-alarm rate 0.2). The rest are <b>dormant �
 silent this scan</b>. The agent must report <i>all</i> occupied regions; dormant transmitters can only come from
 memory. CLBench&rsquo;s official schedule: 90 instances across 3 stages, scored by <b>available-spectrum IoU</b>.</p>
 
+<h2>1b · The three reference points, in plain words</h2>
+<p>Every memory experiment needs a floor, a standard baseline, and a ceiling. Ours, in one sentence each:</p>
+<ul>
+<li><b>No-memory baseline (the floor).</b> An agent with amnesia: it answers each scan from what is visible
+<i>right now</i> and forgets everything in between (context = system prompt + current scan, nothing else).
+Whatever it scores is what the task gives you <i>for free, without any memory</i> — every memory system must
+beat this or it is doing nothing.</li>
+<li><b>ICL (the standard memory baseline).</b> &ldquo;In-context learning&rdquo; memory: the model simply
+<i>re-reads the entire conversation</i> — every past scan and its own past answers stay in the context window.
+No compression, no note-taking, no training; when the context overflows, the oldest turns fall off (FIFO).
+This is what you get by default with a big-enough context, so it is <i>the baseline to beat</i>: a memory
+system only earns its keep if it outperforms simply re-reading everything. (In our RL <i>training</i> setup
+ICL is deliberately switched <b>off</b> — the context is windowed to the current scan — so that the trainable
+channel is the only memory. In the head-to-head evaluation ICL is switched back on as a competitor curve.)</li>
+<li><b>Ceiling (the perfect agent).</b> A hypothetical agent with perfect memory <i>and</i> perfect judgment.
+Detector noise keeps even this agent far below the theoretical 1.0: it can only accumulate what the noisy
+detector shows it (misses 15% of active peaks, invents ~20% false peaks). We measure the ceiling by simulation:
+an oracle that accumulates every detection, one that additionally filters all false alarms, one that also
+averages away frequency jitter.</li>
+</ul>
+<table>
+<tr><th>reference point</th><th>our training task<br>(180 MHz, random band, 12 scans)</th><th>official CLBench schedule<br>(168 MHz canonical band, 90 instances)</th></tr>
+<tr><td><b>floor</b> — no memory</td><td>occ ≈ 0.16</td><td>occ ≈ 0.18 &nbsp;(avail ≈ 0.20)</td></tr>
+<tr><td><b>ICL</b> — full history</td><td>not used during training (windowed off);<br>historical ICL-on runs ≈ 0.31 base (confounded era)</td><td><i>measured live in the head-to-head</i> — one of the plot&rsquo;s curves</td></tr>
+<tr><td>trained memory (ours)</td><td>0.40 → 0.44 (weak prompt + RL) · 0.47 (instructed)</td><td><i>measured live in the head-to-head</i></td></tr>
+<tr><td><b>ceiling</b> — perfect agent</td><td>0.447 accumulate-all · 0.513 +FA-filter · 0.549 +denoise · 1.0 scorer max</td><td>0.461 accumulate-all &nbsp;(avail ≈ 0.21)</td></tr>
+</table>
+<p class="cap">How to read any plot in this memo: every curve lives between the floor and the ceiling; a memory
+system is <i>real</i> if it clears the floor, and <i>worth having</i> if it clears ICL — because ICL is what you
+get by just re-reading the transcript. Note also (bottom-right cell): on the bench&rsquo;s own canonical band its
+native metric barely separates floor (0.20) from perfect memory (0.21) — which is why every figure here shows
+both metrics.</p>
+
 <h2>2 · Our adaptation for RL training</h2>
 <p>We turn one <i>session</i> into one RL <b>rollout</b>: 12 scans of one hidden band. The model answers each scan
 with a <code>submit_report(center_freqs)</code> tool call; the environment scores it and delivers the next scan.</p>
