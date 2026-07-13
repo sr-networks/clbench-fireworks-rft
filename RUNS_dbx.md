@@ -19,10 +19,28 @@ dataset `clbench-dbx-canon24` (24 rows = 6 variants × 4 seeds), evaluator
 | run id | arm | config | change under test | outcome |
 |---|---|---|---|---|
 | (local smoke `spicy-state-078060`) | dbx pre-launch | gpt-oss-120b, 2 rows, local pytest | full evaluator path end-to-end | PASS — scores +0.964 / +0.129, q_answered 15/15 both, no penalty misfires |
-| `w7guqqae` | dbx-r1 | 5 ep, 8 cand, lr 1e-4 | first cloud run: plumbing + true a0 from ep0 | RUNNING. **ep0 gate PASSED**: q_answered 15.0 all 192 rollouts, 0 eval errors, all penalties 0. Measured a0 = 0.0016 (191/192 rollouts at anchor 0) → A0 placeholder 0.15 replaced with 0.002. GRPO seed thin but real: 9/24 groups have score variance (nonzero scores are exactly the eff-ladder rungs 0.064 = 1 question at W=0.3, 0.129 = 2); base acc 0.031, mean_nq 5.4 (headroom under budget 8). NOTE: r1 trains with the loose placeholder hinge (bites at 0.30 vs 0.152 corrected) — immaterial unless its anchor rises, watch per epoch. |
-| `xvmz0mxv` | dbx-r2 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (launched 2026-07-13 17:53) |
-| `qmi03m6j` | dbx-r3 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (launched 2026-07-13 17:53) |
-| `xmen1ghu` | dbx-r4 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (launched 2026-07-13 17:53) |
+| `w7guqqae` | dbx-r1 | 5 ep, 8 cand, lr 1e-4 | first cloud run: plumbing + true a0 from ep0 | **COMPLETED — FLAT NULL.** Score [0.006 0.012 0.004 0.009 0.007], acc [0.031 0.035 0.020 0.028 0.031], one_shot 0.000 all 5 epochs, mean_eff ~0.002. ep0 gate had passed (q_answered 15.0 ×192, 0 errors, a0=0.0016 measured → A0 set 0.002). No learning. |
+| `xvmz0mxv` | dbx-r2 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (ep3). Confirming flat: Score [0.006 0.002 0.004], acc ~0.03, one_shot 0.000. |
+| `qmi03m6j` | dbx-r3 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (ep3). Confirming flat: Score [0.010 0.007 0.005], one_shot 0.000. |
+| `xmen1ghu` | dbx-r4 | 5 ep, 8 cand, lr 1e-4 | replicate (corrected A0=0.002 evaluator) | RUNNING (ep3). Confirming flat: Score [0.013 0.010 0.003], one_shot 0.000. |
+
+## VERDICT (2026-07-13): dbx is a FLAT NULL on qwen3-1p7b — a reasoning ceiling, not a reward/scaffold bug
+
+r1 complete and dead flat; r2–4 identical through ep2–3 (all four agree — the cross-replicate trend
+my own rule demands). Autopsy of r1 ep4 rollouts (192) shows the null is **mechanistically clean**:
+- **Scaffold used correctly:** the model issues QUERY, writes `notepad_update`, emits ANSWER in the
+  prescribed loop; the procedural prompt is followed.
+- **SQL mostly valid:** ~80% of queries return data (2451 ok / 637 error / 9 empty) — not a syntax wall.
+- **The wall is multi-hop reasoning:** think-traces show the 1.7B cannot reliably deduce the
+  category→table mapping (queries `items_g1`, sees "Home Audio & Theater", cannot decide if that is the
+  musical-instruments table) and then writes the WRONG fact into the notepad. So memory cannot help —
+  the "informed" in informed-one-shot requires a discovery the model can't complete even once. acc pinned
+  at the ~3% base floor ⇒ the efficiency ladder has no correct answers to climb ⇒ one_shot ≡ 0.
+
+Same capability ceiling as the spectrum notepad-only arm (see [[clbench-spectrum-memory]] null). The
+reward design, evidence gate, budget-8 fix, and A0 calibration are all validated as correct — they just
+have nothing to amplify on a model this small. r2–4 left running to completion for the full 4-replicate
+record (near-certain confirmation; cancelling saves little and muddies the record).
 
 **Caveat (disclosed):** r1 vs r2–4 differ in one reward constant (A0 0.15 vs 0.002 — the anchor
 hinge threshold). The hinge only fires if anchor rises above it; at ep0 anchor ≈ 0.002 and

@@ -419,6 +419,51 @@ policy actually changed, beyond the score curves.</dd>
 <!-- ENTRIES:TOP -->
 
 <div class="entry">
+<div class="ts">2026-07-13 ~18:20 <span class="tag">DBX VERDICT — FLAT NULL ON THE 1.7B. NOT A BUG: A REASONING CEILING. 🧱</span><span class="runid">runs w7guqqae · xvmz0mxv · qmi03m6j · xmen1ghu</span></div>
+<p><b>The database-exploration arm does not train on qwen3-1p7b.</b> Run-1 (<code>w7guqqae</code>)
+finished all 5 epochs dead flat, and runs 2–4 trace the identical shape — so all four replicates agree,
+which is the bar my own curve-reading rule sets (trend across runs, never a single peak). The numbers:</p>
+<table>
+<tr><th>run</th><th>Score by epoch (0→4)</th><th>accuracy</th><th>one-shot</th></tr>
+<tr><td><code>w7guqqae</code></td><td>0.006 · 0.012 · 0.004 · 0.009 · 0.007</td><td>~3%</td><td>0.000 all epochs</td></tr>
+<tr><td><code>xvmz0mxv</code></td><td>0.006 · 0.002 · 0.004 · …</td><td>~3%</td><td>0.000</td></tr>
+<tr><td><code>qmi03m6j</code></td><td>0.010 · 0.007 · 0.005 · …</td><td>~3%</td><td>0.000</td></tr>
+<tr><td><code>xmen1ghu</code></td><td>0.013 · 0.010 · 0.003 · …</td><td>~3%</td><td>0.000</td></tr>
+</table>
+<p><b>Why this matters: the null is clean, and I know exactly where it comes from.</b> I pulled all 192
+epoch-4 rollouts of run-1 and read them. This is <i>not</i> the model failing to use the notepad, and
+<i>not</i> broken plumbing (the ep0 gate had already proven q_answered 15.0, zero errors). The model
+does everything the scaffold asks:</p>
+<ul>
+<li><b>Scaffold followed.</b> It issues <code>QUERY</code>, writes <code>notepad_update</code>, and emits
+<code>ANSWER</code> in the prescribed loop — the procedural prompt works.</li>
+<li><b>SQL is mostly valid.</b> ~80% of queries return rows (2451 ok / 637 error / 9 empty across the
+sample). It is not hitting a syntax wall.</li>
+<li><b>The wall is multi-hop reasoning.</b> The think-traces show the 1.7B unable to deduce the
+category→table mapping: it queries <code>items_g1</code>, sees "Home Audio &amp; Theater", and cannot
+decide whether that is the musical-instruments table — then writes the <i>wrong</i> mapping into the
+notepad. Carrying a wrong fact forward doesn't help. Memory cannot rescue a model that can't get the
+fact right even once.</li>
+</ul>
+<p>That is the whole null in one line: the "informed one-shot" currency is <i>sound</i>, but the
+<i>informed</i> step requires a discovery the 1.7B can't complete. Accuracy is pinned at its ~3% base
+floor, so the efficiency ladder has no correct answers to climb, so one-shot never lifts off zero. This
+is the <b>same capability ceiling</b> the spectrum notepad-only arm hit — a small model can be given a
+perfect memory mechanism and still have nothing worth remembering because it can't produce a correct
+observation to store.</p>
+<p><small><b>Honesty box — what is and isn't concluded.</b> What the null does <i>not</i> impeach: the
+reward design, the evidence gate, the six-variant anti-bake defense, the budget-8 fix, and the measured
+A0 are all validated — they behaved exactly as scripted, they simply had no correct behavior to amplify.
+What it <i>does</i> say: dbx is above the 1.7B's reasoning ceiling. Runs 2–4 are left to finish for a
+clean 4-replicate record rather than cancelled (they cost little more and the flat shape is already
+locked in). One caveat carries over: run-1 used the loose placeholder hinge — immaterial here because
+its anchor never rose (pen_anchor stayed 0), so the flat curve is not a hinge artifact. <b>Consequence
+for the cohort arm:</b> cohort_studies is strictly harder than dbx (SQL <i>plus</i> Kaplan–Meier
+<i>plus</i> cross-study coding-map synthesis), so on this base model it is near-certain to hit the same
+wall — I am holding the full cohort build pending a decision on the base model.</small></p>
+</div>
+
+<div class="entry">
 <div class="ts">2026-07-13 ~17:55 <span class="tag">DBX EPOCH-0 GATE PASSED — TRUE ANCHOR MEASURED (150× BELOW THE PLACEHOLDER), RUNS 2–4 LAUNCHED 🚀</span><span class="runid">runs w7guqqae · xvmz0mxv · qmi03m6j · xmen1ghu</span></div>
 <p>Run-1 (<code>w7guqqae</code>) delivered its epoch-0 eval — the two pre-registered checks both pass:</p>
 <p><b>1. Plumbing is clean.</b> All 192 rollouts answered all 15 questions (q_answered 15.0 flat), zero
