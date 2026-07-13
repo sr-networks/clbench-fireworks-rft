@@ -415,6 +415,20 @@ policy actually changed, beyond the score curves.</dd>
 <!-- ENTRIES:TOP -->
 
 <div class="entry">
+<div class="ts">2026-07-13 ~16:36 <span class="tag">DBX VALIDATION RUN-1 LAUNCHED (SMOKE TEST PASSED FIRST) 🚀</span><span class="runid">run w7guqqae · dataset clbench-dbx-canon24 · evaluator test-dbx-canon-test-dbx-canon</span></div>
+<p>Before spending a job slot, the full evaluator path (eval-protocol pytest → the dbx rollout processor →
+the official task → the reward parse) was smoke-tested locally on 2 dataset rows with a big serverless
+model: both rows scored cleanly through the pipeline — all 15 questions answered on both, zero penalty
+misfires, scores +0.96 vs +0.13. That spread between rows is per-row variance, exactly the raw material
+GRPO's within-group advantages feed on.</p>
+<p><b>Run-1</b> (<code>w7guqqae</code>): qwen3-1p7b, 5 epochs, 8 candidates, lr 1e-4 — the same validation
+config as the spectrum replicates. It goes alone first: epoch-0 has two jobs — prove the cloud plumbing
+(q_answered ≈ 15, no all-zero candidate groups) and measure the <b>true untrained anchor a0</b> (the reward
+currently carries a scripted placeholder of 0.15). Runs 2–4 launch after that check. Registry:
+<code>RUNS_dbx.md</code>.</p>
+</div>
+
+<div class="entry">
 <div class="ts">2026-07-13 <span class="tag">NEW ARM: DATABASE_EXPLORATION (dbx) — SECOND TASK DESIGNED, RED-TEAMED OFFLINE, READY FOR VALIDATION RUNS 🧪</span><span class="runid">offline only — no GPU spent yet</span></div>
 <p><b>The milestone:</b> with the spectrum memory result standing, we're extending to the other CLBench
 tasks — first each task separately (design the reward, red-team it, validate on 4 replicate runs), then mix
