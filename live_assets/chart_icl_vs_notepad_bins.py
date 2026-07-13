@@ -3,13 +3,13 @@
             widths) run through the real task engine on the same 24 bands -> an UPPER BOUND for any
             agent without memory (same reference + caveat as chart_saturation).
   ICL     = untrained base model, full history in prompt, no notepad (g7dncu2c ep0, 288 rollouts).
-  notepad = the 4 dormc completion-guard replicate runs (qv2mk5k0, xoi922eh, t37x35oj, aic2o1up),
+  notepad = the 4 dormc16k replicate runs (s8e07n53, yp8deoer, kym4znjc, wqjyy66p — 16384 per-turn cap),
             POOLED: green bar = ep4 (trained, 4x192=768 rollouts), whisker = min-max of the 4 per-run
             means (the repeatability spread), black tick = same 4 runs at ep0 (untrained, pooled).
-Per user request the notepad bars use ONLY the dormc runs (not the legacy pscoc9fp arm).
-Caveat printed + shown on page: at ep4, 3 of 4 runs truncate episodes mid-run, so late bins contain only
-scans actually played (per-bin n shrinks; the autopsy showed complete ~= truncated dorm, so the bias is
-small, but it is a survivorship effect and is disclosed)."""
+Per user request the notepad bars use ONLY dormc runs; the 16k cohort now replaces the 8k one.
+Caveat printed + shown on page: at ep4 completion is 100/97/60/90 percent (only kym4znjc truncates
+heavily), so late bins contain only scans actually played — a much smaller survivorship effect than
+the 8k cohort's, but still disclosed."""
 import json
 import re
 import sys
@@ -35,7 +35,7 @@ from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # 
 OCC = re.compile(r"SCAN_OCC:\s*([0-9.]+)")
 BINS = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 25), (25, 30)]
 LABELS = ["scans 1–5", "6–10", "11–15", "16–20", "21–25", "26–30"]
-DORMC = ["qv2mk5k0", "xoi922eh", "t37x35oj", "aic2o1up"]
+DORMC = ["s8e07n53", "yp8deoer", "kym4znjc", "wqjyy66p"]
 _VARIANTS = {st["variant"]: st["kwargs"] for st in load_default_schedule()}
 
 
@@ -139,8 +139,8 @@ ax.bar(x, icl, w, color="tab:purple",
 ax.bar(x + w, np4, w, color="tab:green",
        yerr=[np.subtract(np4, lo4), np.subtract(hi4, np4)], capsize=4,
        error_kw=dict(lw=1.3, ecolor="#14521c"),
-       label="notepad — RL-trained: 4 replicate dormc runs POOLED, ep4 "
-             "(qv2mk5k0·xoi922eh·t37x35oj·aic2o1up); whisker = min–max of the 4 runs")
+       label="notepad — RL-trained: 4 replicate dormc16k runs POOLED, ep4 "
+             "(s8e07n53·yp8deoer·kym4znjc·wqjyy66p, 16k per-turn cap); whisker = min–max of the 4 runs")
 ax.plot(x + w, np0, marker="_", markersize=18, markeredgewidth=2.2, ls="none", color="black",
         label="black tick = the same 4 runs UNTRAINED (ep0, pooled)")
 for i in range(len(LABELS)):
@@ -159,7 +159,7 @@ ax.set_xticklabels(LABELS)
 ax.set_xlabel("scan position within the 30-scan episode")
 ax.set_ylabel("occ-IoU (higher = report closer to true transmitter set)")
 ax.set_title("Memory dose-response by scan position: no-memory bound vs free in-context history vs "
-             "trained external notepad\n(notepad: the 4 dormc replicates pooled, 768 rollouts/epoch; "
+             "trained external notepad\n(notepad: the 4 dormc16k replicates pooled, 768 rollouts/epoch; "
              "ICL: 288 rollouts; no-mem: deterministic engine replay, same 24 bands)")
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.115), fontsize=8.6, framealpha=0.95)
 ax.grid(axis="y", alpha=0.25)

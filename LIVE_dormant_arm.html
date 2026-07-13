@@ -252,16 +252,20 @@ scaled ×3 (cosmetic, cancels within a GRPO group).</p>
         cap, not cheating, is the residual bottleneck → next arm raises it. Output models
         <span class="mono">clbench-canon-np-dormc1…4</span>.</td></tr>
 <tr><td class="mono">s8e07n53<br>yp8deoer<br>kym4znjc<br>wqjyy66p</td>
-    <td><b>dormc16k-1–4</b> (RUNNING; #1 done) — the anti-truncation arm</td>
+    <td><b>dormc16k-1–4</b> (COMPLETED) — the anti-truncation arm</td>
     <td>identical guarded reward to dormc1–4 (4 hinges incl. completion)</td>
     <td>one knob vs dormc1–4: per-turn output cap <b>8192 → 16384</b> tokens, so richer reports/thinking no
         longer kill the episode mid-run. Directly addresses the survivorship worry: with no truncation, no
         scan is ever filtered out of the eval. 4th copy (<code>wqjyy66p</code>) added 2026-07-13 at the
         user's request.</td>
-    <td>RUNNING. Early: 13 epoch-evals in, <code>scans_completed</code> 29.2–30.0 everywhere (no
-        truncation), mean_dorm rising 0.44→0.49/0.53/0.50. dormc16k-1 (<code>s8e07n53</code>) COMPLETED:
-        scans 30.0 flat all 5 epochs, dorm 0.447→0.488. Output models
-        <span class="mono">clbench-canon-np-dormc16k-1…4</span>.</td></tr>
+    <td class="warn">ALL 4 COMPLETED — <b>memory-learning repeats AND truncation is largely cured.</b>
+        Scan-1 flat in all 4 (+0.0004…+0.0011, clean); complete-episode mean_dorm up in every run
+        (+0.041 / +0.101 / +0.181 / +0.182); ep4 scans_completed 30.0 / 29.6 / 27.0 / 29.2 —
+        3 of 4 finish ≥29 scans (dormc at 8k managed 1 of 4). Residual: <code>kym4znjc</code>
+        (60% complete at ep4, pen_complete 0.078 rising) — again a big-gain run, so the
+        gain↔truncation coupling is weakened but not dead. Score ep0→ep4:
+        1.301→1.433 / 1.288→1.587 / 1.286→1.320 / 1.261→1.766. See the verdict timeline entry.
+        Output models <span class="mono">clbench-canon-np-dormc16k-1…4</span>.</td></tr>
 <tr><td class="mono">aesye5sz<br>moh612qy<br>upbrxew7<br>w6swb23z</td>
     <td><b>screening study scr1–scr4</b> (RUNNING) — 4 identical copies</td>
     <td>identical reward to pscoc9fp (dormant coverage − 3 guards)</td>
@@ -413,6 +417,60 @@ policy actually changed, beyond the score curves.</dd>
 
 <h2>Timeline (newest first)</h2>
 <!-- ENTRIES:TOP -->
+
+<div class="entry">
+<div class="ts">2026-07-13 ~18:00 <span class="tag">DORMC16K VERDICT — ONE KNOB (TOKEN CAP ×2) LARGELY CURES TRUNCATION, MEMORY-LEARNING REPEATS 4/4 ✅</span><span class="runid">runs s8e07n53 · yp8deoer · kym4znjc · wqjyy66p</span></div>
+<p>All four dormc16k replicates are done. Recap of the experiment: these are <i>exact copies</i> of the
+dormc completion-guard runs (same guarded reward, same 24 bands, same lr 2e-4 / 5 epochs / 8 candidates)
+with <b>one knob changed</b> — the per-turn output cap raised 8192 → 16384 tokens. The 8k cohort's verdict
+was "memory-learning repeats, but 3 of 4 runs balloon their reports and truncate episodes to 20–25 scans;
+the cap, not cheating, is the bottleneck". If that diagnosis was right, doubling the cap should keep the
+memory gains <i>and</i> restore full episodes. It mostly did.</p>
+<p><b>Per-run verdict</b> (complete-episode slices from the rollout autopsy, ep0 → ep4; 192 rollouts per
+epoch per run):</p>
+<table>
+<tr><th>run</th><th>scan-1 shift<br>(baking detector)</th><th>complete-episode mean_dorm</th>
+    <th>ep4 scans / %complete</th><th>Score ep0→ep4</th></tr>
+<tr><td class="mono">s8e07n53</td><td>+0.0005 (flat)</td><td>0.447 → 0.488 <span class="good">(+0.041)</span></td>
+    <td><b>30.0 / 100%</b></td><td>1.301 → 1.433</td></tr>
+<tr><td class="mono">yp8deoer</td><td>+0.0004 (flat)</td><td>0.444 → 0.545 <span class="good">(+0.101)</span></td>
+    <td>29.6 / 97%</td><td>1.288 → 1.587</td></tr>
+<tr><td class="mono">kym4znjc</td><td>+0.0011 (flat)</td><td>0.443 → 0.624 <span class="good">(+0.181)</span></td>
+    <td><span class="bad">27.0 / 60%</span></td><td>1.286 → 1.320</td></tr>
+<tr><td class="mono">wqjyy66p</td><td>+0.0005 (flat)</td><td>0.445 → 0.626 <span class="good">(+0.182)</span></td>
+    <td>29.2 / 90%</td><td>1.261 → 1.766</td></tr>
+</table>
+<p><img src="live_assets/chart_dormc16k_verdict.png" alt="dormc16k verdict: complete-episode mean_dorm rose in all 4 runs (panel A); scans_completed held ≥29 in 3 of 4 (panel B)" style="max-width:100%"></p>
+<p><b>What held.</b> (1) <b>Memory-learning repeats: 4 of 4 again.</b> Complete-episode dormant coverage
+rose in every copy, and the scan-1 baking detector is dead flat everywhere (≤ +0.001) — on the very first
+scan there is nothing in the notepad, so a trained model that beat its untrained self there would be
+carrying band knowledge in its weights; none does. The gains are notepad, not weights.
+(2) <b>The cap really was the bottleneck.</b> At 8k, only 1 of 4 runs finished its episodes; at 16k, 3 of 4
+finish ≥ 29 of 30 scans, and the run that stayed perfectly complete (<code>s8e07n53</code>, 30.0 flat across
+all five epochs) also posted the cleanest <i>rising</i> memory_gain curve of the cohort
+(0.058 → 0.136, monotone). <code>yp8deoer</code> is the best all-rounder: Score climbs essentially
+monotonically to the cohort-best trend (1.288 → 1.587), dorm +0.101, 97% complete.</p>
+<p><b>What didn't fully hold.</b> <code>kym4znjc</code> re-created the 8k failure in miniature: the biggest
+dorm gain (+0.181, tied with wqjyy66p) but episodes fall to 27.0 scans / 60% complete at ep4, with
+pen_complete rising all run (0 → 0.078) and a pen_wmax spike (0.089) at ep4 — so its Score actually
+<i>sags</i> to 1.320 despite the best memory. The pattern from the 8k cohort — the hungriest memory-learners
+overrun whatever budget exists — survives the bigger cap in 1 of 4 copies. <code>wqjyy66p</code> showed the
+same drift at ep3 (25.8 scans, pen_complete 0.131) and then <b>self-corrected</b> at ep4 (29.2 scans,
+pen_complete 0.013), which is the guard doing its job.</p>
+<p>The dose-response chart (Part 2 of the ICL-comparison entry below) has been regenerated with these four
+runs as the notepad bars: pooled ep4 late-window occ-IoU is 0.607 vs ICL's 0.297 — the picture is unchanged,
+now with far less survivorship caveat (per-bin n falls only to 3171, was 1465).</p>
+<p><small><b>Honesty box — drift watch and what "flat Score" hides.</b> Two soft spots, both disclosed
+rather than resolved: (1) anchor_dev creeps up in the two big-gain runs (kym4znjc 0.032 → 0.082,
+wqjyy66p 0.034 → 0.074) — still below the hinge's bite but the direction is wrong; the scan-1 rollout
+measure stays flat, so this is drift in the reward's anchor bookkeeping, not detectable weight-baking.
+(2) wqjyy66p's memory_gain metric peaked mid-run (0.112 at ep2) and faded to 0.070 at ep4 even as
+complete-episode dorm kept rising — the per-epoch metric mixes truncated episodes in, so the autopsy's
+complete-episode slice is the number we trust. Per our own curve-reading rule, all trend claims here are
+early-vs-late-half comparisons across 4 replicates, not single-epoch peaks. And to be explicit about the
+weakest copy: s8e07n53's +0.041 is a small gain — the cohort's claim is "4/4 positive direction,
++0.04 to +0.18 range", not "+0.18 everywhere".</small></p>
+</div>
 
 <div class="entry">
 <div class="ts">2026-07-13 ~17:00 <span class="tag">STAGE 2 BUILT + SMOKE-TESTED: ONE EVALUATOR, TWO TASKS — THE MIX DISPATCHER WORKS 🔀</span><span class="runid">offline + 2-row live smoke — no training GPU spent</span></div>
@@ -1107,39 +1165,40 @@ rollouts — just full history and no notepad. The chart groups the episode into
 compares three conditions: <b>no-mem</b> (grey — a <i>perfect scripted</i> agent that reports exactly the
 channels currently visible, replayed through the real task engine on the same 24 bands: the ceiling for any
 agent without memory), <b>ICL</b> (purple — untrained base, full history in the prompt), and <b>notepad</b>
-(green — RL-trained: the <b>4 dormc completion-guard replicates pooled</b>, <code>qv2mk5k0</code> ·
-<code>xoi922eh</code> · <code>t37x35oj</code> · <code>aic2o1up</code> at epoch&nbsp;4, 768 rollouts/epoch;
+(green — RL-trained: the <b>4 dormc16k replicates pooled</b>, <code>s8e07n53</code> ·
+<code>yp8deoer</code> · <code>kym4znjc</code> · <code>wqjyy66p</code> at epoch&nbsp;4, 768 rollouts/epoch;
 the whisker is the min–max across the 4 individual runs — the repeatability spread — and the black tick
 marks the <i>same 4 runs untrained</i> (ep0, pooled), so the training gain is the green above the tick).
-<i>(Chart updated 2026-07-13: per review, the notepad bars now use only the dormc replication runs rather
-than the single legacy pscoc9fp run.)</i></p>
+<i>(Chart updated twice on 2026-07-13: first per review to use only dormc replication runs; then, once the
+dormc16k cohort completed, its 4 runs replaced the 8k ones — same design, per-turn cap 16384, far less
+truncation. Numbers below match the current chart.)</i></p>
 
 <img src="live_assets/chart_icl_vs_notepad_bins.png" alt="occ-IoU by 5-scan bin: no-memory bound vs untrained full-history ICL vs RL-trained notepad (black tick = untrained notepad)">
 
 <p><small>Fine-grained slices (the 5-scan bins above average away the scan-1/scan-2 detail):</small></p>
 <table>
-<tr><th>scan slice</th><th>notepad untrained <span class="runid">dormc1–4 ep0, pooled</span></th>
-    <th>notepad RL-trained <span class="runid">dormc1–4 ep4, pooled</span></th>
+<tr><th>scan slice</th><th>notepad untrained <span class="runid">dormc16k-1–4 ep0, pooled</span></th>
+    <th>notepad RL-trained <span class="runid">dormc16k-1–4 ep4, pooled</span></th>
     <th>ICL, no training <span class="runid">g7dncu2c ep0</span></th></tr>
-<tr><td>scan 1 (no memory possible)</td><td>0.217</td><td>0.217 <b>(+0.000 — the clean-memory discriminator)</b></td><td>0.210</td></tr>
-<tr><td>scan 2</td><td>0.283</td><td>0.361 <span class="good">(+0.078)</span></td><td>0.337</td></tr>
-<tr><td>scans 3–5</td><td>0.382</td><td>0.539 <span class="good">(+0.157)</span></td><td>0.398</td></tr>
-<tr><td>scans 16–30 (late)</td><td>0.461</td><td><b>0.629</b> <span class="good">(+0.168)</span></td><td><span class="bad">0.297</span></td></tr>
+<tr><td>scan 1 (no memory possible)</td><td>0.216</td><td>0.217 <b>(+0.001 — the clean-memory discriminator)</b></td><td>0.210</td></tr>
+<tr><td>scan 2</td><td>0.286</td><td>0.331 <span class="good">(+0.045)</span></td><td>0.337</td></tr>
+<tr><td>scans 3–5</td><td>0.385</td><td>0.475 <span class="good">(+0.090)</span></td><td>0.398</td></tr>
+<tr><td>scans 16–30 (late)</td><td>0.454</td><td><b>0.607</b> <span class="good">(+0.153)</span></td><td><span class="bad">0.297</span></td></tr>
 </table>
 
 <p><b>1. Early on, free history is competitive — against the <i>untrained</i> notepad it wins at scan 2.</b>
-At scan 2 the untrained ICL model scores 0.337 vs the untrained notepad's 0.283: reading the previous report
+At scan 2 the untrained ICL model scores 0.337 vs the untrained notepad's 0.286: reading the previous report
 straight out of the prompt costs nothing, while writing a notepad and reading it back is a skill the base
-model only partly has. Training closes exactly this gap — the trained notepad takes scan 2 (0.361) and the
-whole 1–5 bin (0.439 vs 0.348).</p>
+model only partly has. Training closes most of this gap — the trained notepad ties scan 2 (0.331 vs 0.337)
+and takes the whole 1–5 bin (0.394 vs 0.348).</p>
 <p><b>2. Late — where memory actually matters — ICL collapses toward the no-memory bound.</b> ICL peaks in
 the 6–10 bin (0.378) and then decays monotonically: 0.371 → 0.308 → 0.294 → <b>0.286</b> at scans 26–30 —
 barely above the perfect no-memory agent's 0.266. By scan 25 the prompt holds ~25 scans of raw text and the
 1.7B loses the facts buried in the middle of it, so the "free" history buys almost nothing anymore. The
-trained notepad holds 0.60–0.64 across every bin from 6–10 onward — at 26–30 it scores <b>0.598</b>
-(<span class="good">+0.31 over ICL, +0.33 over the no-memory bound</span>), and even the <i>untrained</i>
-notepad (black tick, 0.462) beats ICL late by +0.18. The whiskers show all 4 replicate runs agree on the
-direction: even the <i>weakest</i> run's late bins (~0.52) sit far above ICL.</p>
+trained notepad holds 0.56–0.62 across every bin from 6–10 onward — at 26–30 it scores <b>0.612</b>
+(<span class="good">+0.33 over ICL, +0.35 over the no-memory bound</span>), and even the <i>untrained</i>
+notepad (black tick, 0.453) beats ICL late by +0.17. The whiskers show all 4 replicate runs agree on the
+direction: even the <i>weakest</i> run's late bins (~0.50–0.55) sit far above ICL.</p>
 <p><b>3. Footnote: training doesn't rescue ICL either.</b> Run <code>g7dncu2c</code> did go on to train for
 8 epochs on the dense-occ reward: its late scans only recovered to 0.330 while scans 2–5 got <i>worse</i>
 (scan 2: 0.338→0.308) — it learned to degrade less over a long context, not to accumulate. Details in its
@@ -1150,19 +1209,19 @@ size, it is only better while the history is short; where memory matters most it
 three bars. The notepad is not a workaround for the wiped context — it is a compression format (29 scans
 squeezed into ~13 short lines, always at the bottom of the prompt) that a small model can actually read.</p>
 
-<p><small><b>Honesty box — what is and isn't controlled.</b> The notepad bars are the 4 dormc
-completion-guard replicates pooled (guarded reward, lr&nbsp;2e-4, 8 candidates; 4×192 = 768 rollouts per
-epoch), scored with the same per-scan occ-IoU as everything else. <b>Survivorship caveat:</b> at ep4, 3 of
-the 4 runs truncate some episodes mid-run (the token-cap issue in the verdict entry), so the late bins
-contain only scans actually played — per-bin sample count falls from 3840 (scans 1–5) to 1465 (scans
-26–30). The rollout autopsy showed complete ≈ truncated episodes on memory score, so the bias is small, but
-the late-bin dip (0.638 → 0.598) partly reflects this changing composition. Scan-1 is 0.217 = 0.217
-untrained vs trained — the clean-memory discriminator, flat. The ICL bar is the epoch-0 eval of
-<code>g7dncu2c</code>: raw base qwen3-1p7b, zero training applied, full history, no notepad (288 rollouts).
-Not identical to the notepad arm: its dataset is <code>canon-nudge24</code> (slightly different
-system-prompt wording — hence its scan-1 floor 0.210 vs 0.217; both are statistically at the memoryless
-floor, SE ±0.005) and its per-call token cap was 4096 vs 8192 (irrelevant for the untrained-bar reading,
-since ICL pays for memory in <i>input</i> tokens, not output). The pre-canon ICL-era runs in the registry
+<p><small><b>Honesty box — what is and isn't controlled.</b> The notepad bars are the 4 dormc16k
+replicates pooled (guarded reward, lr&nbsp;2e-4, 8 candidates, 16384 per-turn cap; 4×192 = 768 rollouts per
+epoch), scored with the same per-scan occ-IoU as everything else. <b>Survivorship caveat, now small:</b> at
+ep4 completion is 100 / 97 / 60 / 90% across the 4 runs (only <code>kym4znjc</code> truncates heavily), so
+the late bins contain only scans actually played — per-bin sample count falls from 3840 (scans 1–5) to 3171
+(scans 26–30), far milder than the 8k cohort's fall to 1465. The rollout autopsy showed complete ≈ truncated
+episodes on memory score, so the residual bias is small (the 21–25 → 26–30 change is 0.615 → 0.612).
+Scan-1 is 0.216 vs 0.217 untrained vs trained — the clean-memory discriminator, flat. The ICL bar is the
+epoch-0 eval of <code>g7dncu2c</code>: raw base qwen3-1p7b, zero training applied, full history, no notepad
+(288 rollouts). Not identical to the notepad arm: its dataset is <code>canon-nudge24</code> (slightly
+different system-prompt wording — hence its scan-1 floor 0.210 vs 0.216; both are statistically at the
+memoryless floor, SE ±0.005) and its per-call token cap was 4096 vs 16384 (irrelevant for the untrained-bar
+reading, since ICL pays for memory in <i>input</i> tokens, not output). The pre-canon ICL-era runs in the registry
 footnote remain non-comparable; <code>g7dncu2c</code> is the one apples-to-apples ICL reference. <b>The
 no-mem bar is not a model</b>: it is a deterministic scripted policy (report exactly the currently visible
 channels) replayed through the real task engine on the same 24 bands — an <i>upper bound</i> for memoryless
