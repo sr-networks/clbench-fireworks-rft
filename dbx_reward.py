@@ -31,7 +31,8 @@ anchor from validation run 1 (same protocol as the spectrum a0 constants).
 import re
 
 W = {0: 1.0, 1: 1.0, 2: 0.6, 3: 0.3}
-A0 = 0.15          # placeholder: scripted memoryless pos-1 eff; re-measure at ep0
+A0 = 0.002         # MEASURED: w7guqqae ep0 anchor mean 0.0016 (191/192 rollouts at 0);
+                   # hinge now bites at anchor > 0.152 (was 0.30 with the 0.15 placeholder)
 A_MARGIN = 0.15
 PEN_BAKE_WT = 2.0
 PEN_COMPLETE_WT = 1.5

@@ -419,7 +419,38 @@ policy actually changed, beyond the score curves.</dd>
 <!-- ENTRIES:TOP -->
 
 <div class="entry">
-<div class="ts">2026-07-13 ~18:00 <span class="tag">DORMC16K VERDICT — ONE KNOB (TOKEN CAP ×2) LARGELY CURES TRUNCATION, MEMORY-LEARNING REPEATS 4/4 ✅</span><span class="runid">runs s8e07n53 · yp8deoer · kym4znjc · wqjyy66p</span></div>
+<div class="ts">2026-07-13 ~17:55 <span class="tag">DBX EPOCH-0 GATE PASSED — TRUE ANCHOR MEASURED (150× BELOW THE PLACEHOLDER), RUNS 2–4 LAUNCHED 🚀</span><span class="runid">runs w7guqqae · xvmz0mxv · qmi03m6j · xmen1ghu</span></div>
+<p>Run-1 (<code>w7guqqae</code>) delivered its epoch-0 eval — the two pre-registered checks both pass:</p>
+<p><b>1. Plumbing is clean.</b> All 192 rollouts answered all 15 questions (q_answered 15.0 flat), zero
+eval errors, zero invalid scores, and every penalty (anchor / complete / bake) sat at exactly 0. The
+budget-8 fix holds in the cloud: mean queries per question is 5.4, comfortable under the cap, no
+episode deaths.</p>
+<p><b>2. The true untrained anchor is ~zero.</b> The anchor (position-1 efficiency, structurally
+memoryless — there is nothing in the notepad at question 1) measured <b>0.0016</b>: 191 of 192 rollouts
+at exactly 0. The scripted placeholder in the reward (A0 = 0.15) was ~100× too generous — a policy
+could have baked schema facts into its weights and raised its anchor to 0.30 before the hinge fired.
+Fixed: A0 = 0.002 (measured), so the hinge now bites at anchor &gt; 0.152. Evaluator re-uploaded;
+<b>runs 2–4 launched with the corrected hinge</b> (<code>xvmz0mxv</code> · <code>qmi03m6j</code> ·
+<code>xmen1ghu</code>, identical config otherwise: qwen3-1p7b, 5 epochs, 8 candidates, lr 1e-4).</p>
+<p><b>What the base model can and can't do.</b> Untrained accuracy is 3.1% — the 1.7B is bad at
+exploratory SQL, as expected. But the reward ladder is walkable: 9 of 24 candidate groups already
+contain score variance at ep0, and every nonzero score is exactly an efficiency-ladder rung (0.064 =
+one question answered in 3 queries, 0.129 = two). That ~7% seed of "stumbled into an efficient answer"
+is what GRPO amplifies — the same size seed the spectrum arm started from (6% recall).</p>
+<p><small><b>Honesty box — one constant differs between run-1 and runs 2–4.</b> Run-1 continues on the
+placeholder hinge (fires at 0.30) while runs 2–4 use the corrected one (0.152). The hinge only matters
+if the trained anchor rises; at ep0 it is 0.002 and pen_anchor is 0 everywhere. If run-1's anchor stays
+≤ 0.15 through all 5 epochs the difference never activates and run-1 counts as a full replicate;
+otherwise run-1 is the pilot and runs 2–4 are the matched trio. Also: 15 of 24 candidate groups are
+all-zero at ep0 — gradient exists but is thin; if the curves stay flat through ~ep2 the first suspect
+is seed starvation, and the lever is partial credit for correct-but-inefficient answers (a W&gt;0 rung
+at 4–5 queries), changed one-at-a-time per the single-lever rule. The mix evaluator
+(<code>test-mix-canon</code>) was re-uploaded with the corrected A0 so Stage 3 won't ship the stale
+snapshot.</small></p>
+</div>
+
+<div class="entry">
+<div class="ts">2026-07-13 ~17:45 <span class="tag">DORMC16K VERDICT — ONE KNOB (TOKEN CAP ×2) LARGELY CURES TRUNCATION, MEMORY-LEARNING REPEATS 4/4 ✅</span><span class="runid">runs s8e07n53 · yp8deoer · kym4znjc · wqjyy66p</span></div>
 <p>All four dormc16k replicates are done. Recap of the experiment: these are <i>exact copies</i> of the
 dormc completion-guard runs (same guarded reward, same 24 bands, same lr 2e-4 / 5 epochs / 8 candidates)
 with <b>one knob changed</b> — the per-turn output cap raised 8192 → 16384 tokens. The 8k cohort's verdict
