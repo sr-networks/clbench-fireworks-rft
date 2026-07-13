@@ -415,6 +415,30 @@ policy actually changed, beyond the score curves.</dd>
 <!-- ENTRIES:TOP -->
 
 <div class="entry">
+<div class="ts">2026-07-13 ~17:00 <span class="tag">STAGE 2 BUILT + SMOKE-TESTED: ONE EVALUATOR, TWO TASKS — THE MIX DISPATCHER WORKS 🔀</span><span class="runid">offline + 2-row live smoke — no training GPU spent</span></div>
+<p>The multi-task milestone needs one RFT job that trains on BOTH memory tasks at once. The plumbing is now
+built and validated: <code>mix48.jsonl</code> (24 spectrum dormc rows + 24 dbx rows, 50/50; each row already
+carries its own system prompt), <code>mix_canon_processor.py</code> (routes each row by its id —
+<code>canon-*</code> → the spectrum processor, <code>dbx-*</code> → the dbx processor — sharing one
+concurrency budget), and <code>mix_reward.py</code> (same routing to each task's validated reward; an
+unroutable row fails loud instead of scoring zero). GRPO is what makes this safe with no reward-scale
+tuning: advantages are computed within one row's candidate group, and a group is always a single task.</p>
+<p><b>The bug that didn't ship:</b> the spectrum processor reads its regime from an environment variable
+<i>at import time</i> — imported bare, it defaults to full-history ICL, which would have silently trained
+the spectrum half in the wrong regime (and looked like a mysteriously easy task). The mix files now pin
+<code>SPECTRUM_CANON_NOTEPAD=1</code> before the import; the <code>mode=NOTEPAD</code> banner is verified in
+the smoke run.</p>
+<p><b>Validation:</b> routing unit checks (both directions + unroutable-raises) PASS; live 2-row smoke
+(1 spectrum + 1 dbx through the one dispatcher, gpt-oss-120b): dbx row +0.857 with 15/15 questions answered,
+spectrum row +2.463 with 30/30 scans — each with its own intact metric suite. Metric names are disjoint
+between tasks, so the two curves stay separately readable in one dashboard.</p>
+<p><small><b>Honesty box:</b> 50/50 is by <i>rows</i>, not tokens — dbx episodes run longer than spectrum
+ones, so dbx gets a larger token share of each epoch. <code>make_mix_dataset.py --dbx-frac</code> is the
+knob if the pilot shows one task starving the other. The pilot itself (Stage 3) stays gated on the dbx
+4-replicate validation (Stage 1b, run-1 <code>w7guqqae</code> in flight).</small></p>
+</div>
+
+<div class="entry">
 <div class="ts">2026-07-13 ~16:36 <span class="tag">DBX VALIDATION RUN-1 LAUNCHED (SMOKE TEST PASSED FIRST) 🚀</span><span class="runid">run w7guqqae · dataset clbench-dbx-canon24 · evaluator test-dbx-canon-test-dbx-canon</span></div>
 <p>Before spending a job slot, the full evaluator path (eval-protocol pytest → the dbx rollout processor →
 the official task → the reward parse) was smoke-tested locally on 2 dataset rows with a big serverless
