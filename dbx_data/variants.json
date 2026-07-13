@@ -1,0 +1,80 @@
+[
+ {
+  "variant": 0,
+  "map": {
+   "office": "g1",
+   "electronics": "g2",
+   "musical": "g3"
+  },
+  "bundle": {
+   "office": "A",
+   "electronics": "B",
+   "musical": "C"
+  }
+ },
+ {
+  "variant": 1,
+  "map": {
+   "office": "g1",
+   "electronics": "g3",
+   "musical": "g2"
+  },
+  "bundle": {
+   "office": "B",
+   "electronics": "C",
+   "musical": "A"
+  }
+ },
+ {
+  "variant": 2,
+  "map": {
+   "office": "g2",
+   "electronics": "g1",
+   "musical": "g3"
+  },
+  "bundle": {
+   "office": "C",
+   "electronics": "A",
+   "musical": "B"
+  }
+ },
+ {
+  "variant": 3,
+  "map": {
+   "office": "g2",
+   "electronics": "g3",
+   "musical": "g1"
+  },
+  "bundle": {
+   "office": "A",
+   "electronics": "C",
+   "musical": "B"
+  }
+ },
+ {
+  "variant": 4,
+  "map": {
+   "office": "g3",
+   "electronics": "g1",
+   "musical": "g2"
+  },
+  "bundle": {
+   "office": "B",
+   "electronics": "A",
+   "musical": "C"
+  }
+ },
+ {
+  "variant": 5,
+  "map": {
+   "office": "g3",
+   "electronics": "g2",
+   "musical": "g1"
+  },
+  "bundle": {
+   "office": "C",
+   "electronics": "B",
+   "musical": "A"
+  }
+ }
+]
