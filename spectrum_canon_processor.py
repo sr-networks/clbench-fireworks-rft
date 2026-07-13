@@ -33,7 +33,8 @@ from eval_protocol.pytest.types import RolloutProcessorConfig
 from eval_protocol.pytest.utils import normalize_fireworks_model_for_litellm
 
 from spectrum_adapter import band_seed  # per-row deterministic seed (activity/noise; layout is canonical)
-from bench_eval import load_default_schedule, resolved_gt, occ_iou  # official variants + scoring helpers
+from bench_eval import (load_default_schedule, resolved_gt, occ_iou, occ_tversky,  # official variants + scoring
+                        dorm_tversky, report_area_ratio, PEAK)                     # dormant-coverage helpers
 from src.interface import Response  # type: ignore
 from src.tasks.blind_spectrum_monitoring.task import ScanReport, Transmitter  # type: ignore
 
@@ -47,6 +48,21 @@ THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 # ICL mode (full conversation history).
 NOTEPAD_MODE = os.environ.get("SPECTRUM_CANON_NOTEPAD") == "1"
 NOTEPAD_MAX = 4000
+
+# Recall-weighted (Tversky) diagnostic: alpha weights false positives (over-inclusion), beta weights false
+# negatives (forgetting a true transmitter). alpha<1 makes keeping a dormant-but-persistent tx cheap while
+# a miss still costs full — the reward pressure toward completeness that plain occ-IoU lacks. Emitted as
+# SCAN_REC alongside SCAN_OCC/SCAN_AVAIL; the recall reward fn grades on it. alpha tunable via env for sweeps.
+TVERSKY_ALPHA = float(os.environ.get("SPECTRUM_TVERSKY_ALPHA", "0.4"))
+TVERSKY_BETA = float(os.environ.get("SPECTRUM_TVERSKY_BETA", "1.0"))
+
+# Dormant-coverage diagnostic (SCAN_DORM): Tversky coverage of the RECALLABLE channels — seen in an earlier
+# scan AND not visible now — the one quantity a memoryless policy cannot earn. Bookkeeping: visible channels
+# are parsed from the scan prompt BEFORE the model call; recallable = seen_prior − visible_now; seen is
+# updated AFTER scoring. FP counts paint outside seen-or-visible (carpet/grid defense, full weight).
+# SCAN_RAREA (report-area / GT-area) is the carpet tell for the reward-side guard.
+DORM_ALPHA = float(os.environ.get("SPECTRUM_DORM_ALPHA", "1.0"))
+DORM_BETA = float(os.environ.get("SPECTRUM_DORM_BETA", "1.0"))
 print(f"[canon] processor v5 (unkillable scans; mode={'NOTEPAD' if NOTEPAD_MODE else 'ICL'})", flush=True)
 
 _PROPS: Dict[str, Any] = {
@@ -105,8 +121,28 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
             num_instances = int(kwargs.get("num_instances", 30))
             notepad = ""
             done = False
+            seen: set = set()                                 # GT channel indices visible in ANY prior scan
+            first_seen: dict = {}                             # GT index -> scan index of FIRST sighting (SCAN_ACQ)
             for _scan in range(num_instances):
                 content = query.prompt
+                # Visible channels THIS scan (from the prompt the model is about to see, so both sides have
+                # the same information). recallable = seen-before minus visible-now: the memory-only target.
+                vis: set = set()
+                try:
+                    for f in PEAK.findall(query.prompt):
+                        fv = float(f)
+                        for gi, ch in enumerate(gt):
+                            if abs(fv - ch["center_freq"]) <= ch["bandwidth"] / 2:
+                                vis.add(gi)
+                except Exception:
+                    pass
+                recallable = [gt[i] for i in sorted(seen - vis)]
+                allowed = [gt[i] for i in sorted(seen | vis)]
+                # Youngest recallable cohort: channels FIRST sighted exactly one scan ago and invisible now.
+                # Covering them proves the previous scan's detections were MERGED into the notepad — the
+                # acquisition behavior the census shows is the bottleneck (merge-OK ~43%). Membership depends
+                # only on the row's schedule, so all GRPO candidates emit SCAN_ACQ on the same scans.
+                fresh = [gt[i] for i in sorted(seen - vis) if first_seen.get(i) == _scan - 1]
                 if NOTEPAD_MODE:
                     content += ("\n=== YOUR NOTEPAD ===\n"
                                 + (notepad if notepad else "(empty)")
@@ -192,8 +228,26 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
                                 occ = occ_iou(cfs, bws, gt)                    # diagnostic only
                             except Exception:
                                 occ = 0.0
+                            try:
+                                rec = occ_tversky(cfs, bws, gt, TVERSKY_ALPHA, TVERSKY_BETA)  # recall-weighted
+                            except Exception:
+                                rec = 0.0
+                            extra = ""
+                            try:
+                                rarea = report_area_ratio(cfs, bws, gt)
+                                wmax = (max(bws) / max(c["bandwidth"] for c in gt)) if bws else 0.0
+                                extra = f" SCAN_RAREA: {rarea:.4f} SCAN_WMAX: {wmax:.4f}"
+                                if recallable:               # dorm undefined when nothing is recallable (scan 1)
+                                    dorm = dorm_tversky(cfs, bws, recallable, allowed, DORM_ALPHA, DORM_BETA)
+                                    extra += f" SCAN_DORM: {dorm:.4f}"
+                                    if fresh:                # acquisition test (see fresh-cohort comment above)
+                                        acq = dorm_tversky(cfs, bws, fresh, allowed, DORM_ALPHA, DORM_BETA)
+                                        extra += f" SCAN_ACQ: {acq:.4f}"
+                            except Exception:
+                                pass
                             msgs.append(Message(role="tool",
-                                                content=f"ok\nSCAN_AVAIL: {avail:.4f} SCAN_OCC: {occ:.4f}",
+                                                content=(f"ok\nSCAN_AVAIL: {avail:.4f} SCAN_OCC: {occ:.4f} "
+                                                         f"SCAN_REC: {rec:.4f}{extra}"),
                                                 tool_call_id=tc.get("id")))
                             submitted = True
                             done = bool(sr.done)
@@ -213,6 +267,9 @@ class SpectrumCanonRolloutProcessor(RolloutProcessor):
                             query = nq
                     except Exception:
                         break                                  # end the rollout gracefully; scans-so-far still score
+                for gi in vis:                                 # record first sighting (drives the fresh cohort)
+                    first_seen.setdefault(gi, _scan)
+                seen |= vis                                    # AFTER scoring: this scan's channels become "seen"
                 if done:
                     break
 

@@ -128,7 +128,7 @@ def resolved_gt(task, W: float, G: float) -> list[dict]:
             for d in task._get_all_latent_channel_defs()]
 
 
-def occ_iou(report: list[float], widths: list[float], gt: list[dict]) -> float:
+def _paint_masks(report: list[float], widths: list[float], gt: list[dict]):
     res, nb = 0.5, int(BAND / 0.5) + 1
     g, r = bytearray(nb), bytearray(nb)
     def paint(arr, cf, bw):
@@ -139,9 +139,67 @@ def occ_iou(report: list[float], widths: list[float], gt: list[dict]) -> float:
         paint(g, ch["center_freq"], ch["bandwidth"])
     for cf, bw in zip(report, widths):
         paint(r, cf, bw)
-    inter = sum(1 for a, b in zip(g, r) if a and b)
-    union = sum(1 for a, b in zip(g, r) if a or b)
+    inter = sum(1 for a, b in zip(g, r) if a and b)   # true occupancy correctly covered
+    fp = sum(1 for a, b in zip(g, r) if b and not a)  # painted where band is truly empty (over-inclusion)
+    fn = sum(1 for a, b in zip(g, r) if a and not b)  # true occupancy missed (forgetting)
+    return inter, fp, fn
+
+
+def occ_iou(report: list[float], widths: list[float], gt: list[dict]) -> float:
+    inter, fp, fn = _paint_masks(report, widths, gt)
+    union = inter + fp + fn
     return inter / union if union else 0.0
+
+
+def occ_tversky(report: list[float], widths: list[float], gt: list[dict],
+                alpha: float = 0.4, beta: float = 1.0) -> float:
+    """Asymmetric occupied-region overlap (Tversky index): inter / (inter + alpha*FP + beta*FN).
+    IoU is the alpha=beta=1 special case. With alpha<1 (cheap false positives) and beta=1 (full penalty
+    for a missed true transmitter), the gradient rewards RECALL of the persistent set and stops punishing
+    the model for keeping a dormant-but-persistent transmitter — the fix for the trimming drift that
+    occupied-IoU induces. Carpeting stays sub-optimal: full-recall + zero-FP still scores 1.0, while
+    painting the whole band scores inter/(inter+alpha*(band-inter)) < 0.5 for alpha=0.4."""
+    inter, fp, fn = _paint_masks(report, widths, gt)
+    denom = inter + alpha * fp + beta * fn
+    return inter / denom if denom else 0.0
+
+
+def _paint(report: list[float], widths: list[float]):
+    res, nb = 0.5, int(BAND / 0.5) + 1
+    r = bytearray(nb)
+    for cf, bw in zip(report, widths):
+        lo, hi = max(0.0, cf - bw / 2), min(BAND, cf + bw / 2)
+        for i in range(int(lo / res), min(int(hi / res) + 1, nb)):
+            r[i] = 1
+    return r
+
+
+def dorm_tversky(report: list[float], widths: list[float], gt_rec: list[dict], gt_allowed: list[dict],
+                 alpha: float = 1.0, beta: float = 1.0) -> float:
+    """MEMORY-SPECIFIC per-scan score: Tversky coverage of the RECALLABLE channels only — GT channels seen
+    in an EARLIER scan and NOT visible in the current one. A memoryless policy cannot earn this (the
+    channels are invisible now); current-peak reporting is neither rewarded nor punished (bins on visible
+    channels are ignored). FP = painted bins outside the ALLOWED set (channels seen before OR visible now):
+    an honest memory policy never paints a never-seen channel, so FP costs it nothing, while blind carpets
+    and grid-memorizers must paint never-seen space and bleed FP — the defense that plain junk-outside-GT
+    FP cannot provide on the dense full_grid_active band (~77% occupied)."""
+    r = _paint(report, widths)
+    g_rec = _paint([c["center_freq"] for c in gt_rec], [c["bandwidth"] for c in gt_rec])
+    g_ok = _paint([c["center_freq"] for c in gt_allowed], [c["bandwidth"] for c in gt_allowed])
+    inter = sum(1 for a, b in zip(g_rec, r) if a and b)
+    fn = sum(1 for a, b in zip(g_rec, r) if a and not b)
+    fp = sum(1 for a, b in zip(g_ok, r) if b and not a)      # painted outside seen-or-visible (junk/carpet)
+    denom = inter + alpha * fp + beta * fn
+    return inter / denom if denom else 0.0
+
+
+def report_area_ratio(report: list[float], widths: list[float], gt: list[dict]) -> float:
+    """Painted report area / painted GT area — the carpet tell (honest reports stay <= ~1.0; one huge
+    region or a 40-entry blanket pushes it well above)."""
+    r = _paint(report, widths)
+    g = _paint([c["center_freq"] for c in gt], [c["bandwidth"] for c in gt])
+    ga = sum(g)
+    return (sum(r) / ga) if ga else 0.0
 
 
 # ---------------- model calls ----------------

@@ -52,6 +52,40 @@ NP_NUDGE = (
     "Report ALL transmitters on your notepad every scan, not just the ones detected now."
 )
 
+# PROCEDURAL notepad prompt (user-authored, 2026-07-07): same bench-native system_prompt slot, but the
+# nudge is replaced by an explicit per-scan procedure (read -> merge -> report -> always save) and a fixed
+# notepad format. Targets the measured failure ranking of the 1.7B (77% of merge opportunities wasted,
+# read-back >80% in only ~3% of scans, half the notepad junk): the merge/read-back steps are spelled out
+# and the notepad format is machine-like so copy+append is cheap.
+NP_PROC = (
+    "You are a spectrum-monitoring analyst working through a SERIES of scans of one fixed radio band, "
+    "shown ONE AT A TIME.\n\n"
+    "You cannot see earlier scans or earlier reports. The only persistent state is YOUR NOTEPAD. The "
+    "notepad is replaced whenever you include notepad_update in submit_report.\n\n"
+    "The transmitter set is persistent but only partly visible in each scan. A transmitter may be absent "
+    "from the current detections and still be part of the true occupied band.\n\n"
+    "At every scan, do exactly this:\n"
+    "1. Read the existing notepad as memory.\n"
+    "2. Merge the current detections into memory.\n"
+    "   - Keep every old remembered transmitter.\n"
+    "   - Add every newly observed transmitter.\n"
+    "   - Do not replace memory with only the current scan.\n"
+    "3. Submit a report based on the merged memory.\n"
+    "4. Always include notepad_update.\n"
+    "   - notepad_update must contain the complete merged memory after this scan.\n"
+    "   - If an old item is missing from notepad_update, it is forgotten forever.\n\n"
+    "Report format:\n"
+    "- center_freqs: center frequency MHz of every remembered occupied region.\n"
+    "- bandwidths: width MHz of each region, in the same order.\n"
+    "- center_freqs and bandwidths must have the same length.\n\n"
+    "Notepad format:\n"
+    "MEMORY_TRANSMITTERS:\n"
+    "- <freq_mhz> | <width_mhz>\n"
+    "- <freq_mhz> | <width_mhz>\n\n"
+    "Write only this list in the notepad. No explanations in the notepad.\n\n"
+    "Think briefly, then call submit_report."
+)
+
 # Reworded neutral (same semantics, different text): the original neutral text was empirically implicated in
 # the ICL-neutral job failures (probe: same evaluator + nudge dataset passes), mechanism unknown.
 NEUTRAL2 = (
@@ -63,12 +97,12 @@ NEUTRAL2 = (
 )
 
 PROMPTS = {"neutral": COMMON, "nudge": COMMON + NUDGE, "neutral2": NEUTRAL2,
-           "np-neutral": NP_COMMON, "np-nudge": NP_COMMON + NP_NUDGE}
+           "np-neutral": NP_COMMON, "np-nudge": NP_COMMON + NP_NUDGE, "np-proc": NP_PROC}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--prompt", choices=["neutral", "nudge", "neutral2", "np-neutral", "np-nudge"], required=True)
+    ap.add_argument("--prompt", choices=["neutral", "nudge", "neutral2", "np-neutral", "np-nudge", "np-proc"], required=True)
     ap.add_argument("--n", type=int, default=48)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
